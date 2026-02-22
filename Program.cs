@@ -63,20 +63,31 @@ namespace ROCAPointBot
             await _client.LoginAsync(TokenType.Bot, _discordToken);
             await _client.StartAsync();
 
-            // 2. 在背景檢查資料庫，不要卡住主執行緒
+            // 2. 在背景檢查並建立資料庫
             _ = Task.Run(async () =>
             {
                 try
                 {
                     using var db = new BotDbContext(_configuration);
+
+                    // ⚠️ 【一次性重建指令】先把舊的、錯誤的表格通通刪除
+                    await db.Database.ExecuteSqlRawAsync(
+                        "DROP TABLE IF EXISTS UserPoints; " +
+                        "DROP TABLE IF EXISTS PointLogs; " +
+                        "DROP TABLE IF EXISTS Configs; " +
+                        "DROP TABLE IF EXISTS GuildConfigs;"
+                    );
+
+                    // 重新建立包含正確設定的所有新表格！
                     await db.Database.EnsureCreatedAsync();
-                    Console.WriteLine("✅ 資料庫連線成功！");
+
+                    Console.WriteLine("✅ 資料庫表格已成功清除並完美重建！");
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"❌ 資料庫連線失敗: {ex.Message}");
                 }
-            });
+            }, stoppingToken);
 
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
