@@ -52,16 +52,31 @@ namespace ROCAPointBot
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            using (var db = new BotDbContext(_configuration)) { await db.Database.EnsureCreatedAsync(); }
-
             var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.GuildMembers };
             _client = new DiscordSocketClient(config);
             _client.Ready += RegisterCommandsAsync;
             _client.SlashCommandExecuted += HandleSlashCommandAsync;
             _client.InteractionCreated += HandleInteractionAsync;
 
+            // 1. 先讓機器人登入並上線！
             await _client.LoginAsync(TokenType.Bot, _discordToken);
             await _client.StartAsync();
+
+            // 2. 在背景檢查資料庫，不要卡住主執行緒
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var db = new BotDbContext(_configuration);
+                    await db.Database.EnsureCreatedAsync();
+                    Console.WriteLine("✅ 資料庫連線成功！");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ 資料庫連線失敗: {ex.Message}");
+                }
+            });
+
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
 
@@ -177,9 +192,51 @@ namespace ROCAPointBot
                         lb.Append("```");
                         await command.FollowupAsync(lb.ToString());
                         break;
+                    case "unbind-roca":
+                        // 檢查管理員權限
+                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator)
+                        {
+                            await command.RespondAsync("❌ 限管理員執行。", ephemeral: true);
+                            return;
+                        }
+                        await command.DeferAsync();
+
+                        if (botConfig != null)
+                        {
+                            db.Configs.Remove(botConfig); // 從資料庫刪除設定
+                            await db.SaveChangesAsync();
+                            await command.FollowupAsync("🔓 已成功解除本伺服器的 Roblox 群組與身分組綁定設定。");
+                        }
+                        else
+                        {
+                            await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定，無需解除。");
+                        }
+                        break;
+                    case "points":
+                        await command.DeferAsync();
+                        var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
+                        string targetName = targetUser.Nickname ?? targetUser.Username;
+
+                        var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetName.ToLower());
+                        int currentPoints = userPoint != null ? userPoint.Points : 0;
+
+                        await command.FollowupAsync($"📊 **{targetName}** 目前擁有 **{currentPoints}** 點。");
+                        break;
                 }
             }
-            catch (Exception ex) { Console.WriteLine(ex.Message); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[指令錯誤] {ex.Message}");
+                string errMsg = "❌ 發生內部錯誤，請檢查資料庫連線或伺服器日誌。";
+                if (command.HasResponded)
+                {
+                    await command.FollowupAsync(errMsg, ephemeral: true);
+                }
+                else
+                {
+                    await command.RespondAsync(errMsg, ephemeral: true);
+                }
+            }
         }
 
         private async Task HandleInteractionAsync(SocketInteraction interaction)
