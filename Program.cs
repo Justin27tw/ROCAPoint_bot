@@ -313,11 +313,23 @@ namespace ROCAPointBot
                 {
                     string username = item.GetProperty("user").GetProperty("username").GetString();
 
-                    if (!existingSet.Contains(username.ToLower()))
+                    // 取得該成員在群組中的權重 (Rank)
+                    int rank = item.GetProperty("role").GetProperty("rank").GetInt32();
+
+                    // 💡 【請在這裡修改你的權重範圍】
+                    // 假設指揮官(旅長)的權重是 239，最低要抓的階級權重是 1 (10以下的就不抓)
+                    int maxRank = 239; // 請填寫「指揮官(旅長)」在 Roblox 群組設定中的 Rank 數字
+                    int minRank = 1;  // 請填寫「最低要抓的身分組」的 Rank 數字
+
+                    // 只有權重小於等於 maxRank，且大於等於 minRank 的成員才會被加入
+                    if (rank <= maxRank && rank >= minRank)
                     {
-                        db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0 });
-                        existingSet.Add(username.ToLower());
-                        addedCount++;
+                        if (!existingSet.Contains(username.ToLower()))
+                        {
+                            db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0 });
+                            existingSet.Add(username.ToLower());
+                            addedCount++;
+                        }
                     }
                 }
 
