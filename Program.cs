@@ -259,6 +259,32 @@ namespace ROCAPointBot
             }
         }
 
+        
+
+        private async Task HandleInteractionAsync(SocketInteraction interaction)
+        {
+            if (interaction is SocketMessageComponent component)
+            {
+                string id = component.Data.CustomId;
+                ulong gid = (ulong)component.GuildId;
+                if (id.StartsWith("clear_cancel_")) { await component.UpdateAsync(m => { m.Content = "❌ 已取消。"; m.Components = null; }); return; }
+                if (id.StartsWith("clear_step1_"))
+                {
+                    var btn2 = new ComponentBuilder().WithButton("⚠️ 最終確認 (2/2)", $"clear_step2_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+                    await component.UpdateAsync(m => { m.Content = "🚨 **【最終警告】** 資料將永久刪除！"; m.Components = btn2.Build(); });
+                    return;
+                }
+                if (id.StartsWith("clear_step2_"))
+                {
+                    using var db = new BotDbContext(_configuration);
+                    db.UserPoints.RemoveRange(db.UserPoints.Where(u => u.GuildId == gid));
+                    foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) l.IsDeleted = true;
+                    await db.SaveChangesAsync();
+                    await component.UpdateAsync(m => { m.Content = "🔥 資料已清空。"; m.Components = null; });
+                }
+            }
+        }
+
         private async Task<int> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
         {
             string cursor = "";
@@ -270,8 +296,9 @@ namespace ROCAPointBot
 
             while (hasMore)
             {
-                // 【修復點】：還原純淨的 API 網址，移除錯誤的 Markdown 語法
-                string url = $"[https://groups.roblox.com/v1/groups/](https://groups.roblox.com/v1/groups/){groupId}/users?limit=100";
+                // 【已修復】確保這裡只有純文字的 https 開頭，絕對沒有中括號 [ ]
+                string url = $"https://groups.roblox.com/v1/groups/{groupId}/users?limit=100";
+
                 if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={cursor}";
 
                 var res = await _http.GetAsync(url);
@@ -308,45 +335,22 @@ namespace ROCAPointBot
             return addedCount;
         }
 
-        private async Task HandleInteractionAsync(SocketInteraction interaction)
-        {
-            if (interaction is SocketMessageComponent component)
-            {
-                string id = component.Data.CustomId;
-                ulong gid = (ulong)component.GuildId;
-                if (id.StartsWith("clear_cancel_")) { await component.UpdateAsync(m => { m.Content = "❌ 已取消。"; m.Components = null; }); return; }
-                if (id.StartsWith("clear_step1_"))
-                {
-                    var btn2 = new ComponentBuilder().WithButton("⚠️ 最終確認 (2/2)", $"clear_step2_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-                    await component.UpdateAsync(m => { m.Content = "🚨 **【最終警告】** 資料將永久刪除！"; m.Components = btn2.Build(); });
-                    return;
-                }
-                if (id.StartsWith("clear_step2_"))
-                {
-                    using var db = new BotDbContext(_configuration);
-                    db.UserPoints.RemoveRange(db.UserPoints.Where(u => u.GuildId == gid));
-                    foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) l.IsDeleted = true;
-                    await db.SaveChangesAsync();
-                    await component.UpdateAsync(m => { m.Content = "🔥 資料已清空。"; m.Components = null; });
-                }
-            }
-        }
-
         private async Task<bool> VerifyUserInRobloxGroup(string username, string groupId)
         {
             try
             {
                 var userReq = new { usernames = new[] { username }, excludeBannedUsers = true };
                 var content = new StringContent(JsonSerializer.Serialize(userReq), Encoding.UTF8, "application/json");
-                // 【修復點】：還原純淨的 API 網址，移除錯誤的 Markdown 語法
-                var userRes = await _http.PostAsync("[https://users.roblox.com/v1/usernames/users](https://users.roblox.com/v1/usernames/users)", content);
+
+                // 【已修復】確保這裡只有純文字的 https 開頭，絕對沒有中括號 [ ]
+                var userRes = await _http.PostAsync("https://users.roblox.com/v1/usernames/users", content);
                 var userJson = await userRes.Content.ReadAsStringAsync();
                 var data = JsonDocument.Parse(userJson).RootElement.GetProperty("data");
                 if (data.GetArrayLength() == 0) return false;
                 long userId = data[0].GetProperty("id").GetInt64();
 
-                // 【修復點】：還原純淨的 API 網址，移除錯誤的 Markdown 語法
-                var groupRes = await _http.GetAsync($"[https://groups.roblox.com/v1/users/](https://groups.roblox.com/v1/users/){userId}/groups/roles");
+                // 【已修復】確保這裡只有純文字的 https 開頭，絕對沒有中括號 [ ]
+                var groupRes = await _http.GetAsync($"https://groups.roblox.com/v1/users/{userId}/groups/roles");
                 var groupJson = await groupRes.Content.ReadAsStringAsync();
                 return groupJson.Contains($"\"id\":{groupId}");
             }
