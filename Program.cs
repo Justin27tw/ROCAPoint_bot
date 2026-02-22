@@ -191,7 +191,7 @@ namespace ROCAPointBot
                         rec.Points += pts;
                         db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() });
                         await db.SaveChangesAsync();
-                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。");
+                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。\n📝 備註原因：{reason}");
                         break;
 
                     case "history":
