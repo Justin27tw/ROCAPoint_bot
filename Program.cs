@@ -82,7 +82,7 @@ namespace ROCAPointBot
                     await db.Database.EnsureCreatedAsync();
 
                     Console.WriteLine("✅ 資料庫表格已成功清除並完美重建！");
-                }
+                }        
                 catch (Exception ex)
                 {
                     Console.WriteLine($"❌ 資料庫連線失敗: {ex.Message}");
