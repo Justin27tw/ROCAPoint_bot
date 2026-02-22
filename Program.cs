@@ -128,8 +128,8 @@ namespace ROCAPointBot
                         await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。正在背景抓取群組成員，請稍候...");
                         int addedCount = await SyncGroupMembersAsync(db, gid, rId);
 
-                        // 修正：使用 FollowupAsync 就不會有錯誤了
-                        await command.FollowupAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
+                        // 【修復點】：改用 command.Channel 確保可以發送訊息
+                        await command.Channel.SendMessageAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
                         break;
 
                     case "sync-members":
@@ -166,10 +166,12 @@ namespace ROCAPointBot
                             chunks.Add(currentChunk.ToString());
                         }
 
-                        // 修正：迴圈內全部使用 FollowupAsync 分段發送
+                        bool isFirst = true;
                         foreach (var chunk in chunks)
                         {
-                            await command.FollowupAsync(chunk);
+                            if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
+                            // 【修復點】：改用 command.Channel 確保可以發送訊息
+                            else { await command.Channel.SendMessageAsync(chunk); }
                         }
                         break;
 
@@ -268,7 +270,7 @@ namespace ROCAPointBot
 
             while (hasMore)
             {
-                // 修正：移除髒掉的 Markdown 網址標籤
+                // 【修復點】：還原純淨的 API 網址，移除錯誤的 Markdown 語法
                 string url = $"[https://groups.roblox.com/v1/groups/](https://groups.roblox.com/v1/groups/){groupId}/users?limit=100";
                 if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={cursor}";
 
@@ -336,16 +338,14 @@ namespace ROCAPointBot
             {
                 var userReq = new { usernames = new[] { username }, excludeBannedUsers = true };
                 var content = new StringContent(JsonSerializer.Serialize(userReq), Encoding.UTF8, "application/json");
-
-                // 修正：移除髒掉的 Markdown 網址標籤
+                // 【修復點】：還原純淨的 API 網址，移除錯誤的 Markdown 語法
                 var userRes = await _http.PostAsync("[https://users.roblox.com/v1/usernames/users](https://users.roblox.com/v1/usernames/users)", content);
                 var userJson = await userRes.Content.ReadAsStringAsync();
                 var data = JsonDocument.Parse(userJson).RootElement.GetProperty("data");
                 if (data.GetArrayLength() == 0) return false;
-
                 long userId = data[0].GetProperty("id").GetInt64();
 
-                // 修正：移除髒掉的 Markdown 網址標籤
+                // 【修復點】：還原純淨的 API 網址，移除錯誤的 Markdown 語法
                 var groupRes = await _http.GetAsync($"[https://groups.roblox.com/v1/users/](https://groups.roblox.com/v1/users/){userId}/groups/roles");
                 var groupJson = await groupRes.Content.ReadAsStringAsync();
                 return groupJson.Contains($"\"id\":{groupId}");
