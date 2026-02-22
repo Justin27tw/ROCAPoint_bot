@@ -153,7 +153,7 @@ namespace ROCAPointBot
                         foreach (var u in all)
                         {
                             // 根據名次給予不同的 Emoji
-                            string rankEmoji = rankIndex switch { 1 => "🥇", 2 => "🥈", 3 => "🥉", _ => "🔹" };
+                            string rankEmoji = rankIndex switch { 1 => "", 2 => "", 3 => "", _ => "" };
 
                             // 使用 Discord 的粗體和行內程式碼來強化視覺效果
                             string line = $"{rankEmoji} **{u.RobloxUsername}** ➔ `{u.Points}` 點\n";
@@ -294,19 +294,25 @@ namespace ROCAPointBot
             string cursor = "";
             bool hasMore = true;
             int addedCount = 0;
+            int removedCount = 0;
 
             var existingUsers = await db.UserPoints.Where(u => u.GuildId == guildId).Select(u => u.RobloxUsername.ToLower()).ToListAsync();
             var existingSet = new HashSet<string>(existingUsers);
 
+            // 建立一個清單，用來記錄這一次從 Roblox API 抓到的「所有符合 1~239 權重的有效玩家」
+            var validActiveUsers = new HashSet<string>();
+
             while (hasMore)
             {
-                // 【已修復】確保這裡只有純文字的 https 開頭，絕對沒有中括號 [ ]
                 string url = $"https://groups.roblox.com/v1/groups/{groupId}/users?limit=100";
-
                 if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={cursor}";
 
                 var res = await _http.GetAsync(url);
-                if (!res.IsSuccessStatusCode) break;
+                if (!res.IsSuccessStatusCode)
+                {
+                    Console.WriteLine("⚠️ Roblox API 請求失敗或已達限制，中斷同步以保護資料庫。");
+                    return addedCount; // 遇到錯誤直接退出，避免誤刪資料
+                }
 
                 var json = await res.Content.ReadAsStringAsync();
                 using var doc = JsonDocument.Parse(json);
@@ -316,18 +322,16 @@ namespace ROCAPointBot
                 foreach (var item in data.EnumerateArray())
                 {
                     string username = item.GetProperty("user").GetProperty("username").GetString();
-
-                    // 取得該成員在群組中的權重 (Rank)
                     int rank = item.GetProperty("role").GetProperty("rank").GetInt32();
 
-                    // 💡 【請在這裡修改你的權重範圍】
-                    // 假設指揮官(旅長)的權重是 239，最低要抓的階級權重是 1 (10以下的就不抓)
-                    int maxRank = 239; // 請填寫「指揮官(旅長)」在 Roblox 群組設定中的 Rank 數字
-                    int minRank = 1;  // 請填寫「最低要抓的身分組」的 Rank 數字
+                    // 💡 確保只有 1~239 的成員會被記錄
+                    int maxRank = 239;
+                    int minRank = 1;
 
-                    // 只有權重小於等於 maxRank，且大於等於 minRank 的成員才會被加入
                     if (rank <= maxRank && rank >= minRank)
                     {
+                        validActiveUsers.Add(username.ToLower());
+
                         if (!existingSet.Contains(username.ToLower()))
                         {
                             db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0 });
@@ -338,16 +342,25 @@ namespace ROCAPointBot
                 }
 
                 if (root.TryGetProperty("nextPageCursor", out var nextCursor) && nextCursor.ValueKind == JsonValueKind.String)
-                {
                     cursor = nextCursor.GetString();
-                }
                 else
-                {
                     hasMore = false;
-                }
             }
 
-            if (addedCount > 0) await db.SaveChangesAsync();
+            // 🧹 【自動清理動作】
+            // 檢查目前資料庫裡的人，如果他不包含在剛剛抓到的「1~239 有效名單」內
+            // (代表他可能升官變成 240~255 了，或者是已經退群了)，就從資料庫中刪除他
+            var usersToDelete = await db.UserPoints.Where(u => u.GuildId == guildId).ToListAsync();
+            var finalDeleteList = usersToDelete.Where(u => !validActiveUsers.Contains(u.RobloxUsername.ToLower())).ToList();
+
+            if (finalDeleteList.Any())
+            {
+                db.UserPoints.RemoveRange(finalDeleteList);
+                removedCount = finalDeleteList.Count;
+                Console.WriteLine($"🗑️ 已自動清理 {removedCount} 位不符合權重或退群的成員。");
+            }
+
+            if (addedCount > 0 || removedCount > 0) await db.SaveChangesAsync();
             return addedCount;
         }
 
