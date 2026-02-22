@@ -25,11 +25,10 @@ namespace ROCAPointBot
             var builder = WebApplication.CreateBuilder(args);
             builder.Services.AddHostedService<DiscordBotService>();
             var app = builder.Build();
-            app.MapGet("/", () => "✅ ROCA Point Bot (SQL Server 版) 正在運行中！");
+            app.MapGet("/", () => "✅ ROCA Point Bot 正在運行中！(包含自動同步成員功能)");
             app.Run();
         }
 
-        // 強制台北時區輔助函數
         public static DateTime GetTaipeiTime()
         {
             DateTime utcNow = DateTime.UtcNow;
@@ -59,30 +58,18 @@ namespace ROCAPointBot
             _client.SlashCommandExecuted += HandleSlashCommandAsync;
             _client.InteractionCreated += HandleInteractionAsync;
 
-            // 1. 先讓機器人登入並上線！
             await _client.LoginAsync(TokenType.Bot, _discordToken);
             await _client.StartAsync();
 
-            // 2. 在背景檢查並建立資料庫
             _ = Task.Run(async () =>
             {
                 try
                 {
                     using var db = new BotDbContext(_configuration);
-
-                    //// ⚠️ 【一次性重建指令】先把舊的、錯誤的表格通通刪除
-                    //await db.Database.ExecuteSqlRawAsync(
-                    //    "DROP TABLE IF EXISTS UserPoints; " +
-                    //    "DROP TABLE IF EXISTS PointLogs; " +
-                    //    "DROP TABLE IF EXISTS Configs; " +
-                    //    "DROP TABLE IF EXISTS GuildConfigs;"
-                    //);
-
-                    // 重新建立包含正確設定的所有新表格！
+                    // 確保資料表存在 (已經移除了危險的 Drop Table，保護你的資料)
                     await db.Database.EnsureCreatedAsync();
-
-                    Console.WriteLine("✅ 資料庫表格已成功清除並完美重建！");
-                }        
+                    Console.WriteLine("✅ 資料庫連線成功並已準備就緒！");
+                }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"❌ 資料庫連線失敗: {ex.Message}");
@@ -96,11 +83,12 @@ namespace ROCAPointBot
         {
             var commands = new List<ApplicationCommandProperties>
             {
-                new SlashCommandBuilder().WithName("setup-roca").WithDescription("🔗 綁定 Roblox 群組與管理身分組").AddOption("roblox_group_id", ApplicationCommandOptionType.String, "Roblox 群組 ID", isRequired: true).AddOption("admin_role", ApplicationCommandOptionType.Role, "管理身分組", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("setup-roca").WithDescription("🔗 綁定 Roblox 群組並自動同步成員").AddOption("roblox_group_id", ApplicationCommandOptionType.String, "Roblox 群組 ID", isRequired: true).AddOption("admin_role", ApplicationCommandOptionType.Role, "管理身分組", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("sync-members").WithDescription("🔄 手動同步 Roblox 群組的最新成員至資料庫").Build(),
                 new SlashCommandBuilder().WithName("points").WithDescription("📊 查詢點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("addpoint").WithDescription("➕ 發放點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).AddOption("points", ApplicationCommandOptionType.Integer, "點數數量", isRequired: true).AddOption("reason", ApplicationCommandOptionType.String, "原因備註", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("history").WithDescription("📜 查詢玩家近期紀錄").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
-                new SlashCommandBuilder().WithName("viewall").WithDescription("🏆 點數總排行榜").Build(),
+                new SlashCommandBuilder().WithName("viewall").WithDescription("🏆 點數總排行榜 (顯示所有成員)").Build(),
                 new SlashCommandBuilder().WithName("del-record").WithDescription("🚨 刪除單筆紀錄").AddOption("id", ApplicationCommandOptionType.Integer, "紀錄 ID", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("unbind-roca").WithDescription("🔓 解除綁定設定").Build(),
                 new SlashCommandBuilder().WithName("clear-all-data").WithDescription("🔥 【極度危險】刪除本伺服器所有資料").Build(),
@@ -116,18 +104,13 @@ namespace ROCAPointBot
 
             try
             {
-                // 1. 預先判斷指令是否需要「隱藏回覆」 (只有自己看得到)
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "clear-all-data";
-
-                // 2. 收到指令的第一時間先 Defer，爭取 15 分鐘的處理時間！
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "clear-all-data" || command.Data.Name == "sync-members";
                 await command.DeferAsync(ephemeral: isEphemeral);
 
                 using var db = new BotDbContext(_configuration);
-
-                // 3. 測試資料庫連線是否暢通
                 if (!await db.Database.CanConnectAsync())
                 {
-                    await command.FollowupAsync("❌ 無法連線到資料庫，請檢查遠端資料庫狀態或防火牆 IP 阻擋設定。");
+                    await command.FollowupAsync("❌ 無法連線到資料庫。");
                     return;
                 }
 
@@ -142,9 +125,57 @@ namespace ROCAPointBot
                         if (botConfig == null) db.Configs.Add(new BotConfig { GuildId = gid, RobloxGroupId = rId, AdminRoleId = rRole.Id });
                         else { botConfig.RobloxGroupId = rId; botConfig.AdminRoleId = rRole.Id; }
                         await db.SaveChangesAsync();
-                        await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。");
+
+                        await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。正在背景抓取群組成員，請稍候...");
+                        int addedCount = await SyncGroupMembersAsync(db, gid, rId);
+                        await guildChannel.SendMessageAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
                         break;
 
+                    case "sync-members":
+                        if (botConfig == null) { await command.FollowupAsync("❌ 請先使用 `/setup-roca` 綁定群組。"); return; }
+                        if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足。"); return; }
+
+                        await command.FollowupAsync("⏳ 正在與 Roblox 同步群組成員名單...");
+                        int newMembers = await SyncGroupMembersAsync(db, gid, botConfig.RobloxGroupId);
+                        await command.FollowupAsync($"✅ 同步完成！本次共新增了 **{newMembers}** 位新成員。");
+                        break;
+
+                    case "viewall":
+                        var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
+                        if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
+
+                        var chunks = new List<string>();
+                        var currentChunk = new StringBuilder("```markdown\n# 🏆 點數總覽 (所有成員)\n");
+
+                        foreach (var u in all)
+                        {
+                            string line = $"{u.RobloxUsername,-20} | {u.Points} 點\n";
+                            // 預防超過 Discord 的 2000 字元限制 (留一點空間給標籤)
+                            if (currentChunk.Length + line.Length > 1900)
+                            {
+                                currentChunk.Append("```");
+                                chunks.Add(currentChunk.ToString());
+                                currentChunk.Clear();
+                                currentChunk.Append("```markdown\n");
+                            }
+                            currentChunk.Append(line);
+                        }
+                        if (currentChunk.Length > "```markdown\n".Length)
+                        {
+                            currentChunk.Append("```");
+                            chunks.Add(currentChunk.ToString());
+                        }
+
+                        // 將拆分好的排行榜一段一段發送出去
+                        bool isFirst = true;
+                        foreach (var chunk in chunks)
+                        {
+                            if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
+                            else { await guildChannel.SendMessageAsync(chunk); }
+                        }
+                        break;
+
+                    // 以下為其他原有指令，邏輯保持不變
                     case "addpoint":
                         if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
                         var exec = (SocketGuildUser)command.User;
@@ -204,24 +235,10 @@ namespace ROCAPointBot
                         await command.FollowupAsync("⚠️ **【第一層確認】** 確定要清空所有資料嗎？", components: btns.Build());
                         break;
 
-                    case "viewall":
-                        var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).Take(30).ToListAsync();
-                        if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
-                        var lb = new StringBuilder("```markdown\n# 🏆 點數總覽 (台北時間)\n");
-                        foreach (var u in all) lb.AppendLine($"{u.RobloxUsername,-20} | {u.Points} 點");
-                        lb.Append("```");
-                        await command.FollowupAsync(lb.ToString());
-                        break;
-
                     case "unbind-roca":
                         if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-                        if (botConfig != null)
-                        {
-                            db.Configs.Remove(botConfig);
-                            await db.SaveChangesAsync();
-                            await command.FollowupAsync("🔓 已成功解除本伺服器的 Roblox 群組與身分組綁定設定。");
-                        }
-                        else { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定，無需解除。"); }
+                        if (botConfig != null) { db.Configs.Remove(botConfig); await db.SaveChangesAsync(); await command.FollowupAsync("🔓 已成功解除本伺服器的設定。"); }
+                        else { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); }
                         break;
 
                     case "points":
@@ -235,14 +252,64 @@ namespace ROCAPointBot
             }
             catch (Exception ex)
             {
-                // 抓取最深層的真實錯誤訊息
                 string realError = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
                 Console.WriteLine($"[指令錯誤] {realError}");
-
                 string errMsg = $"❌ 發生內部錯誤: `{realError}`\n請檢查資料庫狀態。";
                 if (command.HasResponded) await command.FollowupAsync(errMsg, ephemeral: true);
                 else await command.RespondAsync(errMsg, ephemeral: true);
             }
+        }
+
+        // 新增的自動同步群組名單功能
+        private async Task<int> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
+        {
+            string cursor = "";
+            bool hasMore = true;
+            int addedCount = 0;
+
+            // 先撈出現有的玩家清單以加速比對
+            var existingUsers = await db.UserPoints.Where(u => u.GuildId == guildId).Select(u => u.RobloxUsername.ToLower()).ToListAsync();
+            var existingSet = new HashSet<string>(existingUsers);
+
+            while (hasMore)
+            {
+                string url = $"[https://groups.roblox.com/v1/groups/](https://groups.roblox.com/v1/groups/){groupId}/users?limit=100";
+                if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={cursor}";
+
+                var res = await _http.GetAsync(url);
+                if (!res.IsSuccessStatusCode) break;
+
+                var json = await res.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                var data = root.GetProperty("data");
+                foreach (var item in data.EnumerateArray())
+                {
+                    string username = item.GetProperty("user").GetProperty("username").GetString();
+
+                    // 如果該玩家不在資料庫內，就預設給 0 點並存入
+                    if (!existingSet.Contains(username.ToLower()))
+                    {
+                        db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0 });
+                        existingSet.Add(username.ToLower());
+                        addedCount++;
+                    }
+                }
+
+                // 檢查是否還有下一頁的名單
+                if (root.TryGetProperty("nextPageCursor", out var nextCursor) && nextCursor.ValueKind == JsonValueKind.String)
+                {
+                    cursor = nextCursor.GetString();
+                }
+                else
+                {
+                    hasMore = false;
+                }
+            }
+
+            if (addedCount > 0) await db.SaveChangesAsync();
+            return addedCount;
         }
 
         private async Task HandleInteractionAsync(SocketInteraction interaction)
@@ -275,12 +342,12 @@ namespace ROCAPointBot
             {
                 var userReq = new { usernames = new[] { username }, excludeBannedUsers = true };
                 var content = new StringContent(JsonSerializer.Serialize(userReq), Encoding.UTF8, "application/json");
-                var userRes = await _http.PostAsync("https://users.roblox.com/v1/usernames/users", content);
+                var userRes = await _http.PostAsync("[https://users.roblox.com/v1/usernames/users](https://users.roblox.com/v1/usernames/users)", content);
                 var userJson = await userRes.Content.ReadAsStringAsync();
                 var data = JsonDocument.Parse(userJson).RootElement.GetProperty("data");
                 if (data.GetArrayLength() == 0) return false;
                 long userId = data[0].GetProperty("id").GetInt64();
-                var groupRes = await _http.GetAsync($"https://groups.roblox.com/v1/users/{userId}/groups/roles");
+                var groupRes = await _http.GetAsync($"[https://groups.roblox.com/v1/users/](https://groups.roblox.com/v1/users/){userId}/groups/roles");
                 var groupJson = await groupRes.Content.ReadAsStringAsync();
                 return groupJson.Contains($"\"id\":{groupId}");
             }
@@ -288,9 +355,6 @@ namespace ROCAPointBot
         }
     }
 
-    // ==========================================
-    // SQL Server 資料庫設定檔
-    // ==========================================
     public class BotDbContext : DbContext
     {
         private readonly IConfiguration _config;
@@ -304,21 +368,19 @@ namespace ROCAPointBot
         {
             string conn = _config["DbConnection"];
             if (!string.IsNullOrEmpty(conn)) options.UseSqlServer(conn);
-            else options.UseSqlite("Data Source=rocapoints.db"); // 備援用
+            else options.UseSqlite("Data Source=rocapoints.db");
         }
     }
 
     public class UserPoint { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public int Points { get; set; } }
     public class PointLog { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public string AdminName { get; set; } public int PointsAdded { get; set; } public string Reason { get; set; } public DateTime Timestamp { get; set; } public bool IsDeleted { get; set; } }
-    // 加入這個標籤，讓程式在資料庫建一個新表格，避開舊的錯誤表格
+
     [Table("GuildConfigs")]
     public class BotConfig
     {
         [Key]
-        // 加上這行！這會關閉資料庫的「自動遞增」功能，允許我們寫入 Discord ID
         [DatabaseGenerated(DatabaseGeneratedOption.None)]
         public ulong GuildId { get; set; }
-
         public string RobloxGroupId { get; set; }
         public ulong AdminRoleId { get; set; }
     }
