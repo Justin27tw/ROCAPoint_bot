@@ -70,13 +70,13 @@ namespace ROCAPointBot
                 {
                     using var db = new BotDbContext(_configuration);
 
-                    // ⚠️ 【一次性重建指令】先把舊的、錯誤的表格通通刪除
-                    await db.Database.ExecuteSqlRawAsync(
-                        "DROP TABLE IF EXISTS UserPoints; " +
-                        "DROP TABLE IF EXISTS PointLogs; " +
-                        "DROP TABLE IF EXISTS Configs; " +
-                        "DROP TABLE IF EXISTS GuildConfigs;"
-                    );
+                    //// ⚠️ 【一次性重建指令】先把舊的、錯誤的表格通通刪除
+                    //await db.Database.ExecuteSqlRawAsync(
+                    //    "DROP TABLE IF EXISTS UserPoints; " +
+                    //    "DROP TABLE IF EXISTS PointLogs; " +
+                    //    "DROP TABLE IF EXISTS Configs; " +
+                    //    "DROP TABLE IF EXISTS GuildConfigs;"
+                    //);
 
                     // 重新建立包含正確設定的所有新表格！
                     await db.Database.EnsureCreatedAsync();
