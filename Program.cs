@@ -146,23 +146,28 @@ namespace ROCAPointBot
                         if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
 
                         var chunks = new List<string>();
-                        var currentChunk = new StringBuilder("```markdown\n# 🏆 點數總覽 (所有成員)\n");
+                        // 移除 markdown 標籤，改用 Discord 原生標題語法
+                        var currentChunk = new StringBuilder("# 🏆 點數總覽 (所有成員)\n\n");
 
+                        int rankIndex = 1;
                         foreach (var u in all)
                         {
-                            string line = $"{u.RobloxUsername,-20} | {u.Points} 點\n";
+                            // 根據名次給予不同的 Emoji
+                            string rankEmoji = rankIndex switch { 1 => "🥇", 2 => "🥈", 3 => "🥉", _ => "🔹" };
+
+                            // 使用 Discord 的粗體和行內程式碼來強化視覺效果
+                            string line = $"{rankEmoji} **{u.RobloxUsername}** ➔ `{u.Points}` 點\n";
+
                             if (currentChunk.Length + line.Length > 1900)
                             {
-                                currentChunk.Append("```");
                                 chunks.Add(currentChunk.ToString());
                                 currentChunk.Clear();
-                                currentChunk.Append("```markdown\n");
                             }
                             currentChunk.Append(line);
+                            rankIndex++;
                         }
-                        if (currentChunk.Length > "```markdown\n".Length)
+                        if (currentChunk.Length > 0)
                         {
-                            currentChunk.Append("```");
                             chunks.Add(currentChunk.ToString());
                         }
 
@@ -170,7 +175,6 @@ namespace ROCAPointBot
                         foreach (var chunk in chunks)
                         {
                             if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
-                            // 【修復點】：改用 command.Channel 確保可以發送訊息
                             else { await command.Channel.SendMessageAsync(chunk); }
                         }
                         break;
