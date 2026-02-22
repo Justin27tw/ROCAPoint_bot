@@ -24,10 +24,11 @@ namespace ROCAPointBot
             var builder = WebApplication.CreateBuilder(args);
             builder.Services.AddHostedService<DiscordBotService>();
             var app = builder.Build();
-            app.MapGet("/", () => "✅ ROCA Point Bot 旗艦版 (日誌查詢功能已上線)");
+            app.MapGet("/", () => "✅ ROCA Point Bot (SQL Server 版) 正在運行中！");
             app.Run();
         }
 
+        // 強制台北時區輔助函數
         public static DateTime GetTaipeiTime()
         {
             DateTime utcNow = DateTime.UtcNow;
@@ -41,15 +42,17 @@ namespace ROCAPointBot
         private DiscordSocketClient _client;
         private static readonly HttpClient _http = new HttpClient();
         private readonly string _discordToken;
+        private readonly IConfiguration _configuration;
 
         public DiscordBotService(IConfiguration config)
         {
+            _configuration = config;
             _discordToken = config["DiscordToken"];
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            using (var db = new BotDbContext()) { await db.Database.EnsureCreatedAsync(); }
+            using (var db = new BotDbContext(_configuration)) { await db.Database.EnsureCreatedAsync(); }
 
             var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.GuildMembers };
             _client = new DiscordSocketClient(config);
@@ -74,9 +77,7 @@ namespace ROCAPointBot
                 new SlashCommandBuilder().WithName("del-record").WithDescription("🚨 刪除單筆紀錄").AddOption("id", ApplicationCommandOptionType.Integer, "紀錄 ID", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("unbind-roca").WithDescription("🔓 解除綁定設定").Build(),
                 new SlashCommandBuilder().WithName("clear-all-data").WithDescription("🔥 【極度危險】刪除本伺服器所有資料").Build(),
-                // --- 新增：日期全紀錄查詢 ---
-                new SlashCommandBuilder().WithName("daily-records").WithDescription("📅 查詢指定日期的所有點數紀錄")
-                    .AddOption("date", ApplicationCommandOptionType.String, "日期 (格式: YYYY-MM-DD，如 2024-05-20)", isRequired: true).Build()
+                new SlashCommandBuilder().WithName("daily-records").WithDescription("📅 查詢指定日期的所有點數紀錄").AddOption("date", ApplicationCommandOptionType.String, "格式: YYYY-MM-DD", isRequired: true).Build()
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -88,121 +89,93 @@ namespace ROCAPointBot
 
             try
             {
+                using var db = new BotDbContext(_configuration);
+                var botConfig = await db.Configs.FindAsync(gid);
+
                 switch (command.Data.Name)
                 {
-                    case "daily-records":
-                        await command.DeferAsync();
-                        using (var db = new BotDbContext())
-                        {
-                            string dateInput = (string)command.Data.Options.First().Value;
-                            if (!DateTime.TryParse(dateInput, out DateTime targetDate))
-                            {
-                                await command.FollowupAsync("⚠️ 日期格式錯誤！請使用 `YYYY-MM-DD` 格式（例如：2024-05-20）。");
-                                break;
-                            }
-
-                            // 抓取該伺服器、該日期且未刪除的紀錄
-                            var dailyLogs = await db.PointLogs
-                                .Where(l => l.GuildId == gid && l.Timestamp.Date == targetDate.Date && !l.IsDeleted)
-                                .OrderBy(l => l.Timestamp)
-                                .ToListAsync();
-
-                            if (!dailyLogs.Any())
-                            {
-                                await command.FollowupAsync($"📭 **{targetDate:yyyy-MM-dd}** 當天在本伺服器沒有任何點數紀錄。");
-                                break;
-                            }
-
-                            StringBuilder dailySb = new StringBuilder($"# 📅 {targetDate:yyyy-MM-dd} 全伺服器紀錄清單\n");
-                            dailySb.AppendLine("```markdown");
-                            dailySb.AppendLine($"{"ID",-5} | {"時間",-5} | {"玩家",-15} | {"點數",-4} | {"原因"}");
-                            dailySb.AppendLine("---------------------------------------------------------");
-
-                            foreach (var l in dailyLogs)
-                            {
-                                string line = $"{l.Id,-5} | {l.Timestamp:HH:mm} | {l.RobloxUsername,-15} | +{l.PointsAdded,-2} | {l.Reason}\n";
-
-                                // 防止超過 Discord 2000 字上限
-                                if (dailySb.Length + line.Length > 1900)
-                                {
-                                    dailySb.Append("```");
-                                    await command.FollowupAsync(dailySb.ToString());
-                                    dailySb.Clear().AppendLine("```markdown");
-                                }
-                                dailySb.Append(line);
-                            }
-                            dailySb.Append("```");
-                            await command.FollowupAsync(dailySb.ToString());
-                        }
-                        break;
-
-                    case "clear-all-data":
-                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.RespondAsync("❌ 限管理員執行。", ephemeral: true); return; }
-                        var btn1 = new ComponentBuilder().WithButton("確認刪除 (1/2)", $"clear_step1_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-                        await command.RespondAsync("⚠️ **【第一層確認】**\n您即將清空本群所有資料，請問確定嗎？", components: btn1.Build());
-                        break;
-
                     case "setup-roca":
+                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.RespondAsync("❌ 限管理員執行。", ephemeral: true); return; }
                         await command.DeferAsync();
-                        using (var db = new BotDbContext())
-                        {
-                            string rId = (string)command.Data.Options.First(x => x.Name == "roblox_group_id").Value;
-                            var rRole = (SocketRole)command.Data.Options.First(x => x.Name == "admin_role").Value;
-                            var cfg = await db.Configs.FindAsync(gid);
-                            if (cfg == null) db.Configs.Add(new BotConfig { GuildId = gid, RobloxGroupId = rId, AdminRoleId = rRole.Id });
-                            else { cfg.RobloxGroupId = rId; cfg.AdminRoleId = rRole.Id; }
-                            await db.SaveChangesAsync();
-                            await command.FollowupAsync($"✅ 已完成綁定。");
-                        }
+                        string rId = (string)command.Data.Options.First(x => x.Name == "roblox_group_id").Value;
+                        var rRole = (SocketRole)command.Data.Options.First(x => x.Name == "admin_role").Value;
+                        if (botConfig == null) db.Configs.Add(new BotConfig { GuildId = gid, RobloxGroupId = rId, AdminRoleId = rRole.Id });
+                        else { botConfig.RobloxGroupId = rId; botConfig.AdminRoleId = rRole.Id; }
+                        await db.SaveChangesAsync();
+                        await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。");
                         break;
 
                     case "addpoint":
+                        if (botConfig == null) { await command.RespondAsync("❌ 未設定。請先使用 /setup-roca", ephemeral: true); break; }
+                        var exec = (SocketGuildUser)command.User;
+                        if (!exec.Roles.Any(r => r.Id == botConfig.AdminRoleId) && exec.Id != guildChannel.Guild.OwnerId) { await command.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
                         await command.DeferAsync();
-                        using (var db = new BotDbContext())
-                        {
-                            var cfg = await db.Configs.FindAsync(gid);
-                            if (cfg == null) { await command.FollowupAsync("❌ 未設定。"); break; }
-                            var user = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
-                            int pts = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
-                            string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
-                            string name = user.Nickname ?? user.Username;
+                        var user = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
+                        int pts = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
+                        string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
+                        string name = user.Nickname ?? user.Username;
 
-                            if (!await VerifyUserInRobloxGroup(name, cfg.RobloxGroupId)) { await command.FollowupAsync("❌ 玩家不在群組內。"); break; }
+                        if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { await command.FollowupAsync("❌ 玩家不在群組內。"); break; }
 
-                            var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
-                            if (rec == null) { rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 }; db.UserPoints.Add(rec); }
-                            rec.Points += pts;
-                            db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() });
-                            await db.SaveChangesAsync();
-                            await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。");
-                        }
+                        var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
+                        if (rec == null) { rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 }; db.UserPoints.Add(rec); }
+                        rec.Points += pts;
+                        db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() });
+                        await db.SaveChangesAsync();
+                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。");
                         break;
 
                     case "history":
                         await command.DeferAsync();
-                        using (var db = new BotDbContext())
-                        {
-                            var user = (SocketGuildUser)command.Data.Options.First().Value;
-                            string name = user.Nickname ?? user.Username;
-                            var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == name.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
-                            if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
-                            var sb = new StringBuilder($"📜 **{name}** 的個人紀錄：\n");
-                            foreach (var l in logs) sb.AppendLine($"`#{l.Id}` | {l.Timestamp:MM/dd HH:mm} | **+{l.PointsAdded}** | {l.Reason}");
-                            await command.FollowupAsync(sb.ToString());
-                        }
+                        var hUser = (SocketGuildUser)command.Data.Options.First().Value;
+                        string hName = hUser.Nickname ?? hUser.Username;
+                        var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
+                        if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
+                        var sb = new StringBuilder($"📜 **{hName}** 的個人紀錄：\n");
+                        foreach (var l in logs) sb.AppendLine($"`#{l.Id}` | {l.Timestamp:MM/dd HH:mm} | **+{l.PointsAdded}** | {l.Reason}");
+                        await command.FollowupAsync(sb.ToString());
+                        break;
+
+                    case "del-record":
+                        if (botConfig == null) { await command.RespondAsync("⚠️ 請先設定。", ephemeral: true); return; }
+                        if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+                        await command.DeferAsync();
+                        int logId = Convert.ToInt32((long)command.Data.Options.First().Value);
+                        var targetLog = await db.PointLogs.FirstOrDefaultAsync(l => l.Id == logId && l.GuildId == gid);
+                        if (targetLog == null || targetLog.IsDeleted) { await command.FollowupAsync("❌ 找不到該紀錄。"); break; }
+                        var uPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetLog.RobloxUsername.ToLower());
+                        if (uPoint != null) uPoint.Points = Math.Max(0, uPoint.Points - targetLog.PointsAdded);
+                        targetLog.IsDeleted = true;
+                        await db.SaveChangesAsync();
+                        await command.FollowupAsync($"🗑️ 紀錄 #{logId} 已刪除，點數已扣回。");
+                        break;
+
+                    case "daily-records":
+                        await command.DeferAsync();
+                        string dateStr = (string)command.Data.Options.First().Value;
+                        if (!DateTime.TryParse(dateStr, out DateTime dt)) { await command.FollowupAsync("❌ 日期格式錯誤。"); break; }
+                        var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
+                        if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
+                        var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 紀錄清單\n```markdown\n");
+                        foreach (var l in dLogs) dSb.AppendLine($"{l.Timestamp:HH:mm} | {l.RobloxUsername,-15} | +{l.PointsAdded}");
+                        dSb.Append("```");
+                        await command.FollowupAsync(dSb.ToString());
+                        break;
+
+                    case "clear-all-data":
+                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.RespondAsync("❌ 限管理員。", ephemeral: true); return; }
+                        var btns = new ComponentBuilder().WithButton("確認刪除 (1/2)", $"clear_step1_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+                        await command.RespondAsync("⚠️ **【第一層確認】** 確定要清空所有資料嗎？", components: btns.Build());
                         break;
 
                     case "viewall":
                         await command.DeferAsync();
-                        using (var db = new BotDbContext())
-                        {
-                            var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
-                            if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
-                            var lb = new StringBuilder("```markdown\n# 🏆 排行榜 (台北時間)\n");
-                            foreach (var u in all) lb.AppendLine($"{u.RobloxUsername,-20} | {u.Points} 點");
-                            lb.Append("```");
-                            await command.FollowupAsync(lb.ToString());
-                        }
+                        var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
+                        if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
+                        var lb = new StringBuilder("```markdown\n# 🏆 點數總覽 (台北時間)\n");
+                        foreach (var u in all) lb.AppendLine($"{u.RobloxUsername,-20} | {u.Points} 點");
+                        lb.Append("```");
+                        await command.FollowupAsync(lb.ToString());
                         break;
                 }
             }
@@ -218,17 +191,17 @@ namespace ROCAPointBot
                 if (id.StartsWith("clear_cancel_")) { await component.UpdateAsync(m => { m.Content = "❌ 已取消。"; m.Components = null; }); return; }
                 if (id.StartsWith("clear_step1_"))
                 {
-                    var btn2 = new ComponentBuilder().WithButton("⚠️ 最終確認刪除 (2/2)", $"clear_step2_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-                    await component.UpdateAsync(m => { m.Content = "🚨 **【最終警告】**\n按下後將清除所有點數且無法復原！"; m.Components = btn2.Build(); });
+                    var btn2 = new ComponentBuilder().WithButton("⚠️ 最終確認 (2/2)", $"clear_step2_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+                    await component.UpdateAsync(m => { m.Content = "🚨 **【最終警告】** 資料將永久刪除！"; m.Components = btn2.Build(); });
                     return;
                 }
                 if (id.StartsWith("clear_step2_"))
                 {
-                    using var db = new BotDbContext();
+                    using var db = new BotDbContext(_configuration);
                     db.UserPoints.RemoveRange(db.UserPoints.Where(u => u.GuildId == gid));
-                    foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) { l.IsDeleted = true; l.Reason = "[全服重置] " + l.Reason; }
+                    foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) l.IsDeleted = true;
                     await db.SaveChangesAsync();
-                    await component.UpdateAsync(m => { m.Content = $"🔥 **資料已清空！**\n操作者：{component.User.Username}"; m.Components = null; });
+                    await component.UpdateAsync(m => { m.Content = "🔥 資料已清空。"; m.Components = null; });
                 }
             }
         }
@@ -252,13 +225,26 @@ namespace ROCAPointBot
         }
     }
 
+    // ==========================================
+    // SQL Server 資料庫設定檔
+    // ==========================================
     public class BotDbContext : DbContext
     {
+        private readonly IConfiguration _config;
+        public BotDbContext(IConfiguration config) { _config = config; }
+
         public DbSet<UserPoint> UserPoints { get; set; }
         public DbSet<PointLog> PointLogs { get; set; }
         public DbSet<BotConfig> Configs { get; set; }
-        protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite("Data Source=rocapoints.db");
+
+        protected override void OnConfiguring(DbContextOptionsBuilder options)
+        {
+            string conn = _config["DbConnection"];
+            if (!string.IsNullOrEmpty(conn)) options.UseSqlServer(conn);
+            else options.UseSqlite("Data Source=rocapoints.db"); // 備援用
+        }
     }
+
     public class UserPoint { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public int Points { get; set; } }
     public class PointLog { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public string AdminName { get; set; } public int PointsAdded { get; set; } public string Reason { get; set; } public DateTime Timestamp { get; set; } public bool IsDeleted { get; set; } }
     public class BotConfig { [Key] public ulong GuildId { get; set; } public string RobloxGroupId { get; set; } public ulong AdminRoleId { get; set; } }
