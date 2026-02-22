@@ -66,7 +66,6 @@ namespace ROCAPointBot
                 try
                 {
                     using var db = new BotDbContext(_configuration);
-                    // 確保資料表存在 (已經移除了危險的 Drop Table，保護你的資料)
                     await db.Database.EnsureCreatedAsync();
                     Console.WriteLine("✅ 資料庫連線成功並已準備就緒！");
                 }
@@ -128,7 +127,9 @@ namespace ROCAPointBot
 
                         await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。正在背景抓取群組成員，請稍候...");
                         int addedCount = await SyncGroupMembersAsync(db, gid, rId);
-                        await guildChannel.SendMessageAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
+
+                        // 修正：使用 FollowupAsync 就不會有錯誤了
+                        await command.FollowupAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
                         break;
 
                     case "sync-members":
@@ -150,7 +151,6 @@ namespace ROCAPointBot
                         foreach (var u in all)
                         {
                             string line = $"{u.RobloxUsername,-20} | {u.Points} 點\n";
-                            // 預防超過 Discord 的 2000 字元限制 (留一點空間給標籤)
                             if (currentChunk.Length + line.Length > 1900)
                             {
                                 currentChunk.Append("```");
@@ -166,16 +166,13 @@ namespace ROCAPointBot
                             chunks.Add(currentChunk.ToString());
                         }
 
-                        // 將拆分好的排行榜一段一段發送出去
-                        bool isFirst = true;
+                        // 修正：迴圈內全部使用 FollowupAsync 分段發送
                         foreach (var chunk in chunks)
                         {
-                            if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
-                            else { await guildChannel.SendMessageAsync(chunk); }
+                            await command.FollowupAsync(chunk);
                         }
                         break;
 
-                    // 以下為其他原有指令，邏輯保持不變
                     case "addpoint":
                         if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
                         var exec = (SocketGuildUser)command.User;
@@ -260,19 +257,18 @@ namespace ROCAPointBot
             }
         }
 
-        // 新增的自動同步群組名單功能
         private async Task<int> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
         {
             string cursor = "";
             bool hasMore = true;
             int addedCount = 0;
 
-            // 先撈出現有的玩家清單以加速比對
             var existingUsers = await db.UserPoints.Where(u => u.GuildId == guildId).Select(u => u.RobloxUsername.ToLower()).ToListAsync();
             var existingSet = new HashSet<string>(existingUsers);
 
             while (hasMore)
             {
+                // 修正：移除髒掉的 Markdown 網址標籤
                 string url = $"[https://groups.roblox.com/v1/groups/](https://groups.roblox.com/v1/groups/){groupId}/users?limit=100";
                 if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={cursor}";
 
@@ -288,7 +284,6 @@ namespace ROCAPointBot
                 {
                     string username = item.GetProperty("user").GetProperty("username").GetString();
 
-                    // 如果該玩家不在資料庫內，就預設給 0 點並存入
                     if (!existingSet.Contains(username.ToLower()))
                     {
                         db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0 });
@@ -297,7 +292,6 @@ namespace ROCAPointBot
                     }
                 }
 
-                // 檢查是否還有下一頁的名單
                 if (root.TryGetProperty("nextPageCursor", out var nextCursor) && nextCursor.ValueKind == JsonValueKind.String)
                 {
                     cursor = nextCursor.GetString();
@@ -342,11 +336,16 @@ namespace ROCAPointBot
             {
                 var userReq = new { usernames = new[] { username }, excludeBannedUsers = true };
                 var content = new StringContent(JsonSerializer.Serialize(userReq), Encoding.UTF8, "application/json");
+
+                // 修正：移除髒掉的 Markdown 網址標籤
                 var userRes = await _http.PostAsync("[https://users.roblox.com/v1/usernames/users](https://users.roblox.com/v1/usernames/users)", content);
                 var userJson = await userRes.Content.ReadAsStringAsync();
                 var data = JsonDocument.Parse(userJson).RootElement.GetProperty("data");
                 if (data.GetArrayLength() == 0) return false;
+
                 long userId = data[0].GetProperty("id").GetInt64();
+
+                // 修正：移除髒掉的 Markdown 網址標籤
                 var groupRes = await _http.GetAsync($"[https://groups.roblox.com/v1/users/](https://groups.roblox.com/v1/users/){userId}/groups/roles");
                 var groupJson = await groupRes.Content.ReadAsStringAsync();
                 return groupJson.Contains($"\"id\":{groupId}");
