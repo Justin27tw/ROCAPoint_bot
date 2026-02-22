@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace ROCAPointBot
 {
@@ -298,5 +299,16 @@ namespace ROCAPointBot
 
     public class UserPoint { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public int Points { get; set; } }
     public class PointLog { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public string AdminName { get; set; } public int PointsAdded { get; set; } public string Reason { get; set; } public DateTime Timestamp { get; set; } public bool IsDeleted { get; set; } }
-    public class BotConfig { [Key] public ulong GuildId { get; set; } public string RobloxGroupId { get; set; } public ulong AdminRoleId { get; set; } }
+    // 加入這個標籤，讓程式在資料庫建一個新表格，避開舊的錯誤表格
+    [Table("GuildConfigs")]
+    public class BotConfig
+    {
+        [Key]
+        // 加上這行！這會關閉資料庫的「自動遞增」功能，允許我們寫入 Discord ID
+        [DatabaseGenerated(DatabaseGeneratedOption.None)]
+        public ulong GuildId { get; set; }
+
+        public string RobloxGroupId { get; set; }
+        public ulong AdminRoleId { get; set; }
+    }
 }
