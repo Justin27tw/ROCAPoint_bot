@@ -193,9 +193,13 @@ namespace ROCAPointBot
                         var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
                         if (rec == null) { rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 }; db.UserPoints.Add(rec); }
                         rec.Points += pts;
-                        db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() });
+                        // 💡 將它們替換成以下程式碼：
+                        var newLog = new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() };
+                        db.PointLogs.Add(newLog);
                         await db.SaveChangesAsync();
-                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。\n📝 備註原因：{reason}");
+
+                        // 資料庫儲存後，newLog.Id 會自動產生對應的編號
+                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。\n📝 備註原因：{reason}\n🔖 **紀錄 ID**：`{newLog.Id}` *(若需撤銷請使用 /del-record)*");
                         break;
 
                     case "history":
@@ -203,8 +207,12 @@ namespace ROCAPointBot
                         string hName = hUser.Nickname ?? hUser.Username;
                         var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
                         if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
-                        var sb = new StringBuilder($"📜 **{hName}** 的個人紀錄：\n");
-                        foreach (var l in logs) sb.AppendLine($"`#{l.Id}` | {l.Timestamp:MM/dd HH:mm} | **+{l.PointsAdded}** | {l.Reason}");
+
+                        var sb = new StringBuilder($"# 📜 **{hName}** 的近期紀錄\n\n");
+                        foreach (var l in logs)
+                        {
+                            sb.AppendLine($"🔖 `ID: {l.Id}` | ⏰ {l.Timestamp:MM/dd HH:mm} | ➔ `+{l.PointsAdded}` 點 | 📝 {l.Reason}");
+                        }
                         await command.FollowupAsync(sb.ToString());
                         break;
 
@@ -226,9 +234,12 @@ namespace ROCAPointBot
                         if (!DateTime.TryParse(dateStr, out DateTime dt)) { await command.FollowupAsync("❌ 日期格式錯誤。"); break; }
                         var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
                         if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
-                        var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 紀錄清單\n```markdown\n");
-                        foreach (var l in dLogs) dSb.AppendLine($"{l.Timestamp:HH:mm} | {l.RobloxUsername,-15} | +{l.PointsAdded}");
-                        dSb.Append("```");
+
+                        var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 發放紀錄清單\n\n");
+                        foreach (var l in dLogs)
+                        {
+                            dSb.AppendLine($"🔖 `ID: {l.Id}` | ⏰ {l.Timestamp:HH:mm} | **{l.RobloxUsername}** ➔ `+{l.PointsAdded}` 點 | 📝 {l.Reason}");
+                        }
                         await command.FollowupAsync(dSb.ToString());
                         break;
 
