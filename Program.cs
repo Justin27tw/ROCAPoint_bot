@@ -335,6 +335,22 @@ namespace ROCAPointBot
 
         private async Task<int> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
         {
+            // 🌟 新增：根據綁定的群組 ID 決定最高 Rank 限制
+            int maxRank = 255; // 預設最高值 (若未來綁定其他群組的防呆預設)
+            switch (groupId)
+            {
+                case "13549943": // 憲兵
+                    maxRank = 239;
+                    break;
+                case "13662982": // 裝甲
+                    maxRank = 120;
+                    break;
+                case "16223475": // 航特
+                    maxRank = 55;
+                    break;
+            }
+            int minRank = 1; // 最低 Rank 皆從 1 開始
+
             string cursor = "";
             bool hasMore = true;
             int addedCount = 0;
@@ -343,7 +359,7 @@ namespace ROCAPointBot
             var existingUsers = await db.UserPoints.Where(u => u.GuildId == guildId).Select(u => u.RobloxUsername.ToLower()).ToListAsync();
             var existingSet = new HashSet<string>(existingUsers);
 
-            // 建立一個清單，用來記錄這一次從 Roblox API 抓到的「所有符合 1~239 權重的有效玩家」
+            // 建立一個清單，用來記錄這一次從 Roblox API 抓到的「所有符合設定權重的有效玩家」
             var validActiveUsers = new HashSet<string>();
 
             while (hasMore)
@@ -368,10 +384,7 @@ namespace ROCAPointBot
                     string username = item.GetProperty("user").GetProperty("username").GetString();
                     int rank = item.GetProperty("role").GetProperty("rank").GetInt32();
 
-                    // 💡 確保只有 1~239 的成員會被記錄
-                    int maxRank = 239;
-                    int minRank = 1;
-
+                    // 💡 使用迴圈外判斷出的 maxRank 與 minRank 進行篩選
                     if (rank <= maxRank && rank >= minRank)
                     {
                         validActiveUsers.Add(username.ToLower());
@@ -392,8 +405,8 @@ namespace ROCAPointBot
             }
 
             // 🧹 【自動清理動作】
-            // 檢查目前資料庫裡的人，如果他不包含在剛剛抓到的「1~239 有效名單」內
-            // (代表他可能升官變成 240~255 了，或者是已經退群了)，就從資料庫中刪除他
+            // 檢查目前資料庫裡的人，如果他不包含在剛剛抓到的「有效名單」內
+            // (代表他可能升官超過設定的 rank，或者是已經退群了)，就從資料庫中刪除他
             var usersToDelete = await db.UserPoints.Where(u => u.GuildId == guildId).ToListAsync();
             var finalDeleteList = usersToDelete.Where(u => !validActiveUsers.Contains(u.RobloxUsername.ToLower())).ToList();
 
