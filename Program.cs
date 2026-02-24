@@ -142,42 +142,47 @@ namespace ROCAPointBot
                         break;
 
                     case "viewall":
-                        var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
-                        if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
+    var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
+    if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
 
-                        var chunks = new List<string>();
-                        // 移除 markdown 標籤，改用 Discord 原生標題語法
-                        var currentChunk = new StringBuilder("## 點數總覽 (所有成員)\n\n");
+    var chunks = new List<string>();
+    // 將標題放在外面，並開啟 Markdown 程式碼區塊 (```md) 來達成等寬對齊
+    var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```md\n");
 
-                        int rankIndex = 1;
-                        foreach (var u in all)
-                        {
-                            // 根據名次給予不同的 Emoji
-                            string rankEmoji = rankIndex switch { 1 => "", 2 => "", 3 => "", _ => "" };
+    int rankIndex = 1;
+    foreach (var u in all)
+    {
+        // 將名次、名字、點數設定為固定長度
+        string rankStr = $"[{rankIndex}]".PadRight(5);
+        string nameStr = u.RobloxUsername.PadRight(20); // 假設 Roblox 名字最長 20 字
+        string pointStr = $"{u.Points} 點".PadLeft(8);  // 點數靠右對齊
 
-                            // 使用 Discord 的粗體和行內程式碼來強化視覺效果
-                            string line = $"{rankEmoji} **{u.RobloxUsername}** ➔ `{u.Points}` 點\n";
+        string line = $"{rankStr} {nameStr} ➔ {pointStr}\n";
 
-                            if (currentChunk.Length + line.Length > 1900)
-                            {
-                                chunks.Add(currentChunk.ToString());
-                                currentChunk.Clear();
-                            }
-                            currentChunk.Append(line);
-                            rankIndex++;
-                        }
-                        if (currentChunk.Length > 0)
-                        {
-                            chunks.Add(currentChunk.ToString());
-                        }
+        // 如果字數快超過 Discord 的 2000 字限制，就先切斷並發送
+        if (currentChunk.Length + line.Length > 1900)
+        {
+            currentChunk.AppendLine("```"); // 關閉當前區塊
+            chunks.Add(currentChunk.ToString());
+            currentChunk.Clear();
+            currentChunk.AppendLine("```md\n"); // 開啟新區塊
+        }
+        currentChunk.Append(line);
+        rankIndex++;
+    }
+    if (currentChunk.Length > 0)
+    {
+        currentChunk.AppendLine("```"); // 補上最後的關閉標籤
+        chunks.Add(currentChunk.ToString());
+    }
 
-                        bool isFirst = true;
-                        foreach (var chunk in chunks)
-                        {
-                            if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
-                            else { await command.Channel.SendMessageAsync(chunk); }
-                        }
-                        break;
+    bool isFirst = true;
+    foreach (var chunk in chunks)
+    {
+        if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
+        else { await command.Channel.SendMessageAsync(chunk); }
+    }
+    break;
 
                     case "addpoint":
                         if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
@@ -208,12 +213,19 @@ namespace ROCAPointBot
                         var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
                         if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
 
-                        var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n\n");
+                        var sb = new StringBuilder($"### 📜 **{hName}** 的近期紀錄\n```md\n");
                         foreach (var l in logs)
                         {
-                            // 💡 這裡加上了 | 👤 登記人: {l.AdminName}
-                            sb.AppendLine($" `ID: {l.Id}` |  {l.Timestamp:MM/dd HH:mm} | ➔ `+{l.PointsAdded}` 點 | 原因： {l.Reason} |  登記人: **{l.AdminName}**");
+                            // 固定英文與數字的長度
+                            string idStr = $"[ID: {l.Id}]".PadRight(9);
+                            string timeStr = l.Timestamp.ToString("MM/dd HH:mm");
+                            string ptsStr = $"+{l.PointsAdded}".PadLeft(5);
+                            string adminStr = l.AdminName.PadRight(12);
+
+                            // 將變動長度的中文放在尾端
+                            sb.AppendLine($"{idStr} {timeStr} | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
                         }
+                        sb.AppendLine("```");
                         await command.FollowupAsync(sb.ToString());
                         break;
 
@@ -236,12 +248,18 @@ namespace ROCAPointBot
                         var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
                         if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
 
-                        var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 發放紀錄清單\n\n");
+                        var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 發放紀錄清單\n```md\n");
                         foreach (var l in dLogs)
                         {
-                            // 💡 這裡加上了 | 👤 登記人: {l.AdminName}
-                            dSb.AppendLine($" `ID: {l.Id}` |  {l.Timestamp:HH:mm} | **{l.RobloxUsername}** ➔ `+{l.PointsAdded}` 點 | 原因： {l.Reason} | 登記人: **{l.AdminName}**");
+                            string idStr = $"[ID: {l.Id}]".PadRight(9);
+                            string timeStr = l.Timestamp.ToString("HH:mm");
+                            string nameStr = l.RobloxUsername.PadRight(18);
+                            string ptsStr = $"+{l.PointsAdded}".PadLeft(5);
+                            string adminStr = l.AdminName.PadRight(12);
+
+                            dSb.AppendLine($"{idStr} {timeStr} | {nameStr} ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
                         }
+                        dSb.AppendLine("```");
                         await command.FollowupAsync(dSb.ToString());
                         break;
 
