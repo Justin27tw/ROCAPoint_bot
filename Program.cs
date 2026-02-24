@@ -147,7 +147,8 @@ namespace ROCAPointBot
 
     var chunks = new List<string>();
     // 將標題放在外面，並開啟 Markdown 程式碼區塊 (```md) 來達成等寬對齊
-    var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```md\n");
+    // 把原本的 ```md 改成純文字區塊 ```text
+    var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```text\n");
 
     int rankIndex = 1;
     foreach (var u in all)
@@ -213,7 +214,8 @@ namespace ROCAPointBot
                         var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
                         if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
 
-                        var sb = new StringBuilder($"### 📜 **{hName}** 的近期紀錄\n```md\n");
+                        // 把原本的 ```md 改成純文字區塊 ```text
+                        var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n```text\n");
                         foreach (var l in logs)
                         {
                             // 固定英文與數字的長度
@@ -248,7 +250,8 @@ namespace ROCAPointBot
                         var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
                         if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
 
-                        var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 發放紀錄清單\n```md\n");
+                        // 把原本的 ```md 改成純文字區塊 ```text
+                        var dSb = new StringBuilder($"#  {dt:yyyy-MM-dd} 發放紀錄清單\n```text\n");
                         foreach (var l in dLogs)
                         {
                             string idStr = $"[ID: {l.Id}]".PadRight(9);
