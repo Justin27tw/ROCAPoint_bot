@@ -147,7 +147,7 @@ namespace ROCAPointBot
 
                         var chunks = new List<string>();
                         // 移除 markdown 標籤，改用 Discord 原生標題語法
-                        var currentChunk = new StringBuilder("# 🏆 點數總覽 (所有成員)\n\n");
+                        var currentChunk = new StringBuilder("## 點數總覽 (所有成員)\n\n");
 
                         int rankIndex = 1;
                         foreach (var u in all)
@@ -199,7 +199,7 @@ namespace ROCAPointBot
                         await db.SaveChangesAsync();
 
                         // 資料庫儲存後，newLog.Id 會自動產生對應的編號
-                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。\n📝 備註原因：{reason}\n🔖 **紀錄 ID**：`{newLog.Id}` *(若需撤銷請使用 /del-record)*");
+                        await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。\n 備註原因：{reason}\n **紀錄 ID**：`{newLog.Id}` *(若需撤銷請使用 /del-record)*");
                         break;
 
                     case "history":
@@ -208,10 +208,11 @@ namespace ROCAPointBot
                         var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
                         if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
 
-                        var sb = new StringBuilder($"# 📜 **{hName}** 的近期紀錄\n\n");
+                        var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n\n");
                         foreach (var l in logs)
                         {
-                            sb.AppendLine($"🔖 `ID: {l.Id}` | ⏰ {l.Timestamp:MM/dd HH:mm} | ➔ `+{l.PointsAdded}` 點 | 📝 {l.Reason}");
+                            // 💡 這裡加上了 | 👤 登記人: {l.AdminName}
+                            sb.AppendLine($" `ID: {l.Id}` |  {l.Timestamp:MM/dd HH:mm} | ➔ `+{l.PointsAdded}` 點 | 原因： {l.Reason} |  登記人: **{l.AdminName}**");
                         }
                         await command.FollowupAsync(sb.ToString());
                         break;
@@ -238,7 +239,8 @@ namespace ROCAPointBot
                         var dSb = new StringBuilder($"# 📅 {dt:yyyy-MM-dd} 發放紀錄清單\n\n");
                         foreach (var l in dLogs)
                         {
-                            dSb.AppendLine($"🔖 `ID: {l.Id}` | ⏰ {l.Timestamp:HH:mm} | **{l.RobloxUsername}** ➔ `+{l.PointsAdded}` 點 | 📝 {l.Reason}");
+                            // 💡 這裡加上了 | 👤 登記人: {l.AdminName}
+                            dSb.AppendLine($" `ID: {l.Id}` |  {l.Timestamp:HH:mm} | **{l.RobloxUsername}** ➔ `+{l.PointsAdded}` 點 | 原因： {l.Reason} | 登記人: **{l.AdminName}**");
                         }
                         await command.FollowupAsync(dSb.ToString());
                         break;
