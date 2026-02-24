@@ -146,44 +146,47 @@ namespace ROCAPointBot
     if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
 
     var chunks = new List<string>();
-    // 將標題放在外面，並開啟 Markdown 程式碼區塊 (```md) 來達成等寬對齊
-    // 把原本的 ```md 改成純文字區塊 ```text
-    var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```text\n");
+                        // 改用 ansi 區塊
+                        var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```ansi\n");
 
-    int rankIndex = 1;
-    foreach (var u in all)
-    {
-        // 將名次、名字、點數設定為固定長度
-        string rankStr = $"[{rankIndex}]".PadRight(5);
-        string nameStr = u.RobloxUsername.PadRight(20); // 假設 Roblox 名字最長 20 字
-        string pointStr = $"{u.Points} 點".PadLeft(8);  // 點數靠右對齊
+                        int rankIndex = 1;
+                        foreach (var u in all)
+                        {
+                            // 1. 先做純文字對齊
+                            string rankRaw = $"[{rankIndex}]".PadRight(5);
+                            string nameRaw = u.RobloxUsername.PadRight(20);
+                            string pointRaw = $"{u.Points} 點".PadLeft(8);
 
-        string line = $"{rankStr} {nameStr} ➔ {pointStr}\n";
+                            // 2. 包上 ANSI 顏色代碼 (\u001b[代碼m) 
+                            // \u001b[34m 是藍色， \u001b[32m 是綠色， \u001b[0m 是重置回預設顏色
+                            string rankStr = $"\u001b[34m{rankRaw}\u001b[0m";
+                            string pointStr = $"\u001b[32m{pointRaw}\u001b[0m";
 
-        // 如果字數快超過 Discord 的 2000 字限制，就先切斷並發送
-        if (currentChunk.Length + line.Length > 1900)
-        {
-            currentChunk.AppendLine("```"); // 關閉當前區塊
-            chunks.Add(currentChunk.ToString());
-            currentChunk.Clear();
-            currentChunk.AppendLine("```md\n"); // 開啟新區塊
-        }
-        currentChunk.Append(line);
-        rankIndex++;
-    }
-    if (currentChunk.Length > 0)
-    {
-        currentChunk.AppendLine("```"); // 補上最後的關閉標籤
-        chunks.Add(currentChunk.ToString());
-    }
+                            string line = $"{rankStr} {nameRaw} ➔ {pointStr}\n";
 
-    bool isFirst = true;
-    foreach (var chunk in chunks)
-    {
-        if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
-        else { await command.Channel.SendMessageAsync(chunk); }
-    }
-    break;
+                            if (currentChunk.Length + line.Length > 1900)
+                            {
+                                currentChunk.AppendLine("```");
+                                chunks.Add(currentChunk.ToString());
+                                currentChunk.Clear();
+                                currentChunk.AppendLine("```ansi\n"); // 這裡也要記得改為 ansi
+                            }
+                            currentChunk.Append(line);
+                            rankIndex++;
+                        }
+                        if (currentChunk.Length > 0)
+                        {
+                            currentChunk.AppendLine("```"); // 補上最後的關閉標籤
+                            chunks.Add(currentChunk.ToString());
+                        }
+
+                        bool isFirst = true;
+                        foreach (var chunk in chunks)
+                        {
+                            if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
+                            else { await command.Channel.SendMessageAsync(chunk); }
+                        }
+                        break;
 
                     case "addpoint":
                         if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
@@ -214,18 +217,22 @@ namespace ROCAPointBot
                         var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
                         if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
 
-                        // 把原本的 ```md 改成純文字區塊 ```text
-                        var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n```text\n");
+                        var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n```ansi\n"); // 改為 ansi
                         foreach (var l in logs)
                         {
-                            // 固定英文與數字的長度
-                            string idStr = $"[ID: {l.Id}]".PadRight(9);
+                            // 1. 純文字對齊
+                            string idRaw = $"[ID: {l.Id}]".PadRight(9);
                             string timeStr = l.Timestamp.ToString("MM/dd HH:mm");
-                            string ptsStr = $"+{l.PointsAdded}".PadLeft(5);
+                            string ptsRaw = $"+{l.PointsAdded}".PadLeft(5);
                             string adminStr = l.AdminName.PadRight(12);
 
-                            // 將變動長度的中文放在尾端
-                            sb.AppendLine($"{idStr} {timeStr} | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
+                            // 2. 上色
+                            string idStr = $"\u001b[34m{idRaw}\u001b[0m"; // 藍色 ID
+
+                            // 假設點數大於0用綠色，若未來有扣點(小於0)可以判斷用紅色 (\u001b[31m)
+                            string ptsStr = $"\u001b[32m{ptsRaw}\u001b[0m";
+
+                            sb.AppendLine($"{idStr} \u001b[30m{timeStr}\u001b[0m | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
                         }
                         sb.AppendLine("```");
                         await command.FollowupAsync(sb.ToString());
