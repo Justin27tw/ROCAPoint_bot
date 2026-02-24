@@ -91,7 +91,9 @@ namespace ROCAPointBot
                 new SlashCommandBuilder().WithName("del-record").WithDescription("🚨 刪除單筆紀錄").AddOption("id", ApplicationCommandOptionType.Integer, "紀錄 ID", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("unbind-roca").WithDescription("🔓 解除綁定設定").Build(),
                 new SlashCommandBuilder().WithName("clear-all-data").WithDescription("🔥 【極度危險】刪除本伺服器所有資料").Build(),
-                new SlashCommandBuilder().WithName("daily-records").WithDescription("📅 查詢指定日期的所有點數紀錄").AddOption("date", ApplicationCommandOptionType.String, "格式: YYYY-MM-DD", isRequired: true).Build()
+                new SlashCommandBuilder().WithName("daily-records").WithDescription("📅 查詢指定日期的所有點數紀錄").AddOption("date", ApplicationCommandOptionType.String, "格式: YYYY-MM-DD", isRequired: true).Build(),
+                // 👇 新增這行：註冊 status 指令
+                new SlashCommandBuilder().WithName("status").WithDescription("🟢 檢查機器人目前連線與運作狀態").Build()
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -142,10 +144,10 @@ namespace ROCAPointBot
                         break;
 
                     case "viewall":
-    var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
-    if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
+                        var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
+                        if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
 
-    var chunks = new List<string>();
+                        var chunks = new List<string>();
                         // 改用 ansi 區塊
                         var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```ansi\n");
 
@@ -212,6 +214,19 @@ namespace ROCAPointBot
                         await command.FollowupAsync($"✅ 已發放 {pts} 點給 {name}。\n 備註原因：{reason}\n **紀錄 ID**：`{newLog.Id}` *(若需撤銷請使用 /del-record)*");
                         break;
 
+                    // 👇 新增這個 case 區塊
+                    case "status":
+                        int latency = _client.Latency; // 取得 Discord WebSocket 延遲
+                        bool isDbConnected = await db.Database.CanConnectAsync(); // 再次確認資料庫狀態
+                        string dbStatusMsg = isDbConnected ? "✅ 正常連線" : "❌ 無法連線";
+
+                        string statusMessage = $"🟢 **ROCA Point Bot 運作正常！**\n" +
+                                               $"> 📡 **Discord 延遲 (Ping):** `{latency} ms`\n" +
+                                               $"> 🗄️ **資料庫狀態:** {dbStatusMsg}\n" +
+                                               $"> 🕒 **主機目前時間:** `{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}`";
+
+                        await command.FollowupAsync(statusMessage);
+                        break;
                     case "history":
                         var hUser = (SocketGuildUser)command.Data.Options.First().Value;
                         string hName = hUser.Nickname ?? hUser.Username;
