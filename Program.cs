@@ -196,6 +196,7 @@ namespace ROCAPointBot
                         int pts = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
                         string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
                         string name = user.Nickname ?? user.Username;
+                        if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
 
                         if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { await command.FollowupAsync($"❌ 玩家 `{name}` 不在指定的 Roblox 群組內，或名稱不相符。"); break; }
 
@@ -214,6 +215,7 @@ namespace ROCAPointBot
                     case "history":
                         var hUser = (SocketGuildUser)command.Data.Options.First().Value;
                         string hName = hUser.Nickname ?? hUser.Username;
+                        if (hName.Contains("]")) hName = hName.Substring(hName.LastIndexOf(']') + 1).Trim();
                         var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
                         if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
 
@@ -288,6 +290,7 @@ namespace ROCAPointBot
                     case "points":
                         var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
                         string targetName = targetUser.Nickname ?? targetUser.Username;
+                        if (targetName.Contains("]")) targetName = targetName.Substring(targetName.LastIndexOf(']') + 1).Trim();
                         var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetName.ToLower());
                         int currentPoints = userPoint != null ? userPoint.Points : 0;
                         await command.FollowupAsync($"📊 **{targetName}** 目前擁有 **{currentPoints}** 點。");
