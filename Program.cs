@@ -100,8 +100,9 @@ namespace ROCAPointBot
                 // 👇 新增這行：註冊 status 指令
                 new SlashCommandBuilder().WithName("status").WithDescription("🟢 檢查機器人目前連線與運作狀態").Build(),
                 // 👇 新增這兩個指令
-                new SlashCommandBuilder().WithName("admin-setup").WithDescription("🔒 總部專用：將此頻道設為 Admin 頻道以監控其他單位").AddOption("server_codes", ApplicationCommandOptionType.String, "要監控的伺服器編號(多個用逗號分隔，如 A1B2,C3D4)", isRequired: true).Build(),
-                new SlashCommandBuilder().WithName("admin-view").WithDescription("👁️ 總部專用：查看特定單位的總排行榜").AddOption("server_code", ApplicationCommandOptionType.String, "目標伺服器編號", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("admin-setup").WithDescription("🔒 國防部專用：將此頻道設為 Admin 頻道以監控其他單位").AddOption("server_codes", ApplicationCommandOptionType.String, "要監控的伺服器編號(多個用逗號分隔，如 A1B2,C3D4)", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("admin-view").WithDescription("👁️ 國防部專用：查看特定單位的總排行榜").AddOption("server_code", ApplicationCommandOptionType.String, "目標伺服器編號", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("my-code").WithDescription("🔑 查詢本伺服器的專屬資料庫編號 (交給國防部綁定通知用)").Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -113,7 +114,7 @@ namespace ROCAPointBot
 
             try
             {
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "clear-all-data" || command.Data.Name == "sync-members";
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "clear-all-data" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code";
                 await command.DeferAsync(ephemeral: isEphemeral);
 
                 using var db = new BotDbContext(_configuration);
@@ -147,7 +148,7 @@ namespace ROCAPointBot
                         }
                         await db.SaveChangesAsync();
 
-                        await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。\n🔑 **本伺服器專屬資料庫編號：`{botConfig.ServerCode}`** (請妥善保存，交給總部設定 Admin 頻道使用)。\n正在背景抓取群組成員，請稍候...");
+                        await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。\n🔑 **本伺服器專屬資料庫編號：`{botConfig.ServerCode}`** (請妥善保存，交給國防部設定 Admin 頻道使用)。\n正在背景抓取群組成員，請稍候...");
                         int addedCount = await SyncGroupMembersAsync(db, gid, rId);
 
                         await command.Channel.SendMessageAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
@@ -161,7 +162,25 @@ namespace ROCAPointBot
                         int newMembers = await SyncGroupMembersAsync(db, gid, botConfig.RobloxGroupId);
                         await command.FollowupAsync($"✅ 同步完成！本次共新增了 **{newMembers}** 位新成員。");
                         break;
+                    case "my-code":
+                        if (botConfig == null || string.IsNullOrEmpty(botConfig.ServerCode))
+                        {
+                            await command.FollowupAsync("❌ 本伺服器尚未完成設定。請先使用 `/setup-roca` 進行綁定。");
+                            break;
+                        }
 
+                        // 權限檢查：只有綁定的 Admin 身分組，或是伺服器管理員可以查詢編號
+                        var myCodeExec = (SocketGuildUser)command.User;
+                        bool isCodeAdmin = myCodeExec.Roles.Any(r => r.Id == botConfig.AdminRoleId) || myCodeExec.GuildPermissions.Administrator;
+
+                        if (!isCodeAdmin)
+                        {
+                            await command.FollowupAsync("❌ 權限不足！只有管理員可以查詢伺服器專屬編號。");
+                            return;
+                        }
+
+                        await command.FollowupAsync($"🔑 **本伺服器專屬資料庫編號為：** `{botConfig.ServerCode}`\n> 請將此編號交給國防部，以便國防部進行跨伺服器監控設定。");
+                        break;
                     case "viewall":
                         var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
                         if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
@@ -357,7 +376,7 @@ namespace ROCAPointBot
                         var targetData = await db.UserPoints.Where(u => u.GuildId == targetConfig.GuildId).OrderByDescending(u => u.Points).ToListAsync();
                         if (!targetData.Any()) { await command.FollowupAsync($"📭 目標編號 `{targetCode}` 尚無成員資料。"); break; }
 
-                        var targetSb = new StringBuilder($"## 👁️ 總部查閱：單位 [{targetCode}] 點數總覽\n```ansi\n");
+                        var targetSb = new StringBuilder($"## 👁️ 國防部查閱：單位 [{targetCode}] 點數總覽\n```ansi\n");
                         int tRank = 1;
                         foreach (var u in targetData)
                         {
