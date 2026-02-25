@@ -70,9 +70,10 @@ namespace ROCAPointBot
 
                     // 💡 自動嘗試在現有資料表中加入新欄位 (用 Try-Catch 防止重複加入報錯)
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD ServerCode NVARCHAR(50) NULL"); } catch { }
-                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD MasterLogChannelId BIGINT NULL"); } catch { }
-                    // 👇 新增這一行：自動建立多身分組儲存欄位
-                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD AdminRoleIds NVARCHAR(MAX) NULL"); } catch { }
+                    // 1. 將未來新增的型別修正為 decimal(20,0)
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD MasterLogChannelId decimal(20,0) NULL"); } catch { }
+                    // 2. 新增這行：強制將現有資料庫中錯誤的 BIGINT 欄位轉正為 decimal(20,0)
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ALTER COLUMN MasterLogChannelId decimal(20,0) NULL"); } catch { }
 
                     // 👇 ================= 新增這段程式碼 ================= 👇
                     // 自動嘗試建立 AdminChannels 資料表 (如果它不存在的話)
