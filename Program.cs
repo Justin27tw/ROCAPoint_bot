@@ -151,7 +151,7 @@ namespace ROCAPointBot
 
             try
             {
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "clear-all-data" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code";
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code";
                 await command.DeferAsync(ephemeral: isEphemeral);
 
                 using var db = new BotDbContext(_configuration);
@@ -293,17 +293,17 @@ namespace ROCAPointBot
 
                             // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
                             string addMsg = $">  **[點數發放]**登記人：**{command.User.Username}**\n" +
-                                            $">  ✅發放 **{pts}** 點給 **{name}**\n" +
-                                            $">  目前總計：**{rec.Points}** 點\n" +
-                                            $">  備註：{reason} \n" +
-                                            $">  紀錄編號：{newLog.Id}";  // 這裡也修正為 {newLog.Id}
+                                            $">  **✅發放{pts}點給{name}**\n" +
+                                            $">  **目前總計：**{rec.Points} 點**\n" +
+                                            $">  **備註：{reason}** \n" +
+                                            $">  **紀錄編號：{newLog.Id}**";  // 這裡也修正為 {newLog.Id}
                             await command.FollowupAsync(addMsg);
 
                             _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 已發放點數\n" +
-                                        $">  被登記人：**{name}** 獲得 **{pts}** 點\n" +
-                                        $">  目前總計：**{rec.Points}** 點\n" +
-                                        $">  備註：{reason}\n" +
-                                        $">  紀錄編號：**{newLog.Id}** (若需撤銷請使用 /del-record)");
+                                        $">  **被登記人：{name}獲得 {pts} 點**\n" +
+                                        $">  **目前總計：{rec.Points} 點**\n" +
+                                        $">  **備註：{reason}**\n" +
+                                        $">  **紀錄編號**：**{newLog.Id}** (若需撤銷請使用 /del-record)");
                             break;
                         }
                     case "removepoint":
@@ -342,10 +342,10 @@ namespace ROCAPointBot
                             await db.SaveChangesAsync();
 
                             string removeMsg = $">  **[點數扣除/兌換]** 登記人：**{command.User.Username}**\n" +
-                                               $">  ✅成功扣除 **{pts}** 點自 **{name}**\n" +
-                                               $">  目前剩餘：**{rec.Points}** 點\n" +
-                                               $">  備註：{reason} \n" +
-                                               $">  紀錄編號：{newLog.Id}";
+                                               $">  **✅成功扣除 {pts} 點自 {name}**\n" +
+                                               $">  **目前剩餘**：**{rec.Points}** 點\n" +
+                                               $">  **備註：{reason}** \n" +
+                                               $">  **紀錄編號：{newLog.Id}**";
                             await command.FollowupAsync(removeMsg);
 
                             // 推播給總部
@@ -469,9 +469,17 @@ namespace ROCAPointBot
 
                     case "clear-all-data":
                         {
-                            if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員。"); return; }
-                            var btns = new ComponentBuilder().WithButton("確認刪除 (1/2)", $"clear_step1_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-                            await command.FollowupAsync("⚠️ **【第一層確認】** 確定要清空所有資料嗎？", components: btns.Build());
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+
+                            // 確保一開始執行的也是管理員
+                            bool isAdmin = ((SocketGuildUser)command.User).GuildPermissions.Administrator || ((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId);
+                            if (!isAdmin) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+
+                            var btns = new ComponentBuilder()
+                                .WithButton("⚠️ 第一位管理員確認", $"clear_step1_{gid}", ButtonStyle.Danger)
+                                .WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+
+                            await command.FollowupAsync("⚠️ **【資料清空請求】** 確定要清空所有資料嗎？\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
                             break;
                         }
 
@@ -550,7 +558,7 @@ namespace ROCAPointBot
             }
         }
 
-        
+
 
         private async Task HandleInteractionAsync(SocketInteraction interaction)
         {
@@ -558,20 +566,73 @@ namespace ROCAPointBot
             {
                 string id = component.Data.CustomId;
                 ulong gid = (ulong)component.GuildId;
-                if (id.StartsWith("clear_cancel_")) { await component.UpdateAsync(m => { m.Content = "❌ 已取消。"; m.Components = null; }); return; }
-                if (id.StartsWith("clear_step1_"))
+                var executor = (SocketGuildUser)component.User;
+
+                using var db = new BotDbContext(_configuration);
+                var botConfig = await db.Configs.FindAsync(gid);
+
+                // 檢查點擊按鈕的人是否具備管理員權限
+                bool isAdmin = executor.GuildPermissions.Administrator || (botConfig != null && executor.Roles.Any(r => r.Id == botConfig.AdminRoleId));
+
+                if (id.StartsWith("clear_cancel_"))
                 {
-                    var btn2 = new ComponentBuilder().WithButton("⚠️ 最終確認 (2/2)", $"clear_step2_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-                    await component.UpdateAsync(m => { m.Content = "🚨 **【最終警告】** 資料將永久刪除！"; m.Components = btn2.Build(); });
+                    if (!isAdmin) { await component.RespondAsync("❌ 只有管理員可以取消此操作。", ephemeral: true); return; }
+                    await component.UpdateAsync(m => { m.Content = "❌ 資料清空操作已由管理員取消。"; m.Components = null; });
                     return;
                 }
+
+                if (id.StartsWith("clear_step1_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+
+                    // 將第一位管理員的 ID 記錄在按鈕的 CustomId 中，傳給下一步
+                    var btn2 = new ComponentBuilder()
+                        .WithButton("🚨 第二位管理員最終確認", $"clear_step2_{gid}_{executor.Id}", ButtonStyle.Danger)
+                        .WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+
+                    await component.UpdateAsync(m => {
+                        m.Content = $"🚨 **【最終警告】** 資料將永久刪除！\n> 第一位管理員 {executor.Mention} 已確認。\n> 需要 **第二位不同的管理員** 按下確認才能執行！";
+                        m.Components = btn2.Build();
+                    });
+
+                    // 額外發送一則新訊息來真正觸發 Ping 推播通知
+                    if (botConfig != null)
+                    {
+                        string adminRoleMention = $"<@&{botConfig.AdminRoleId}>";
+                        await component.Channel.SendMessageAsync($"🔔 {adminRoleMention} 警告：{executor.Mention} 正在申請清空資料庫，請另一位管理員至上方訊息進行最終確認！");
+                    }
+                    return;
+                }
+
                 if (id.StartsWith("clear_step2_"))
                 {
-                    using var db = new BotDbContext(_configuration);
-                    db.UserPoints.RemoveRange(db.UserPoints.Where(u => u.GuildId == gid));
-                    foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) l.IsDeleted = true;
-                    await db.SaveChangesAsync();
-                    await component.UpdateAsync(m => { m.Content = "🔥 資料已清空。"; m.Components = null; });
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+
+                    // 解析出第一位管理員的 ID
+                    var parts = id.Split('_');
+                    if (parts.Length >= 4 && ulong.TryParse(parts[3], out ulong firstAdminId))
+                    {
+                        // 防呆機制：同一個人不能按兩次
+                        if (executor.Id == firstAdminId)
+                        {
+                            await component.RespondAsync("❌ 您已經確認過了！必須由 **另一位不同的管理員** 來進行最終確認。", ephemeral: true);
+                            return;
+                        }
+
+                        // 兩位不同管理員皆確認，執行刪除
+                        db.UserPoints.RemoveRange(db.UserPoints.Where(u => u.GuildId == gid));
+                        foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) l.IsDeleted = true;
+                        await db.SaveChangesAsync();
+
+                        await component.UpdateAsync(m => {
+                            m.Content = $"🔥 **資料庫已完全清空！**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}。";
+                            m.Components = null;
+                        });
+                    }
+                    else
+                    {
+                        await component.RespondAsync("❌ 發生內部錯誤，無法辨識第一位管理員的身分。", ephemeral: true);
+                    }
                 }
             }
         }
