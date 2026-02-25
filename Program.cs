@@ -281,13 +281,19 @@ namespace ROCAPointBot
                             db.PointLogs.Add(newLog);
                             await db.SaveChangesAsync();
 
-                            string addMsg = $" **[點數發放]** 負責人：**{command.User.Username}**\n" +
-                                            $"> 成功發放了 `{pts}` 點給 `{name}`！\n" +
-                                            $">  **目前總計：`{rec.Points}` 點**\n" +
-                                            $">  備註：{reason}";
+                            // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
+                            string addMsg = $"###  [點數發放] 負責人：**{command.User.Username}**\n" +
+                                            $"###  成功發放 **{pts}** 點給 **{name}**\n" +
+                                            $"###  目前總計：**{rec.Points}** 點\n" +
+                                            $"####  備註：{reason} \n" +
+                                            $"####  紀錄編號：{newLog.Id}";  // 這裡也修正為 {newLog.Id}
                             await command.FollowupAsync(addMsg);
 
-                            _ = BroadcastToAdminChannelsAsync(gid, $"**{command.User.Username}** ✅ 已發放 **{pts}** 點給玩家 `{name}`。\n>  **紀錄編號：** `{newLog.Id}`\n>  **目前總計：** `{rec.Points}` 點\n>  **備註：** {reason} *(若需撤銷請使用 /del-record)*");
+                            _ = BroadcastToAdminChannelsAsync(gid, $"###  負責人 **{command.User.Username}** 已發放點數\n" +
+                                        $">  被登記人：**{name}** 獲得 **{pts}** 點\n" +
+                                        $">  目前總計：**{rec.Points}** 點\n" +
+                                        $">  備註：{reason}\n" +
+                                        $"> 紀錄編號：**{newLog.Id}** (若需撤銷請使用 /del-record)");
                             break;
                         }
 
@@ -358,13 +364,13 @@ namespace ROCAPointBot
                             await db.SaveChangesAsync();
 
                             string delMsg = $" **[紀錄撤銷]** 負責人：**{command.User.Username}**\n" +
-                                            $"> 成功撤銷了紀錄 `#{logId}`！\n" +
-                                            $">  被扣點人：`{targetLog.RobloxUsername}`\n" +
-                                            $">  已扣除：`{targetLog.PointsAdded}` 點\n" +
-                                            $">  **目前剩餘：`{currentPoints}` 點**";
+                                            $"> 成功撤銷了紀錄 #{logId}\n" +
+                                            $">  被扣點人：{targetLog.RobloxUsername}\n" +
+                                            $">  已扣除：{targetLog.PointsAdded} 點\n" +
+                                            $">  **目前剩餘：{currentPoints} 點**";
 
                             await command.FollowupAsync(delMsg);
-                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣回了 `{targetLog.PointsAdded}` 點。\n>  人員：`{targetLog.RobloxUsername}`\n>  剩餘：`{currentPoints}` 點");
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣除 {targetLog.PointsAdded} 點。\n>  人員：{targetLog.RobloxUsername}\n>  剩餘：{currentPoints}點");
                             break;
                         }
 
@@ -605,6 +611,15 @@ namespace ROCAPointBot
             var sourceConfig = await db.Configs.FindAsync(sourceGuildId);
             if (sourceConfig == null || string.IsNullOrEmpty(sourceConfig.ServerCode)) return;
 
+            // 👇 新增這段：透過群組 ID 判斷單位名稱
+            string unitName = sourceConfig.RobloxGroupId switch
+            {
+                "13549943" => "憲兵",
+                "13662982" => "裝甲",
+                "16223475" => "航特",
+                _ => "未知"
+            };
+
             var adminConfigs = await db.AdminChannels.ToListAsync();
             foreach (var ac in adminConfigs)
             {
@@ -613,7 +628,11 @@ namespace ROCAPointBot
                 {
                     if (_client.GetChannel(ac.ChannelId) is IMessageChannel channel)
                     {
-                        try { await channel.SendMessageAsync($"🔔 **[連線單位 {sourceConfig.ServerCode} 異動回報]**\n> {message}"); }
+                        try
+                        {
+                            // 👇 修改這行：讓推播訊息顯示為 "裝甲單位點數通知[資料庫3A3F3]" 的格式
+                            await channel.SendMessageAsync($" **{unitName}單位點數通知[資料庫{sourceConfig.ServerCode}]**\n> {message}");
+                        }
                         catch { /* 若沒有頻道發言權限則忽略 */ }
                     }
                 }
