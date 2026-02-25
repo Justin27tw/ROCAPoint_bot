@@ -619,15 +619,38 @@ namespace ROCAPointBot
                             return;
                         }
 
-                        // 兩位不同管理員皆確認，執行刪除
-                        db.UserPoints.RemoveRange(db.UserPoints.Where(u => u.GuildId == gid));
-                        foreach (var l in db.PointLogs.Where(l => l.GuildId == gid)) l.IsDeleted = true;
+                        // 1. 將所有人的點數歸零，但不刪除資料庫內的人員名單
+                        var allUsers = db.UserPoints.Where(u => u.GuildId == gid);
+                        foreach (var user in allUsers)
+                        {
+                            user.Points = 0;
+                        }
+
+                        // 2. 將先前的歷史紀錄標記為已刪除
+                        foreach (var log in db.PointLogs.Where(l => l.GuildId == gid))
+                        {
+                            log.IsDeleted = true;
+                        }
+
                         await db.SaveChangesAsync();
 
+                        // 3. 更新原本的按鈕訊息
                         await component.UpdateAsync(m => {
-                            m.Content = $"🔥 **資料庫已完全清空！**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}。";
+                            m.Content = $"🔥 **全體人員點數已成功歸零！**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}。";
                             m.Components = null;
                         });
+
+                        // 4. 👇 新增：抓取第一位管理員的名稱，並發送推播通知給國防部 Admin 頻道 👇
+                        string firstAdminName = executor.Guild.GetUser(firstAdminId)?.Username ?? firstAdminId.ToString();
+                        string secondAdminName = executor.Username;
+
+                        _ = BroadcastToAdminChannelsAsync(gid,
+                            $"🚨 **【重大操作警告：全體點數歸零】**\n" +
+                            $"> 該單位的負責人已執行了 **清空所有成員點數** 的操作！\n" +
+                            $"> 授權執行者一：**{firstAdminName}**\n" +
+                            $"> 授權執行者二：**{secondAdminName}**\n" +
+                            $"> 狀態：資料庫點數已全數歸零。");
+                        // 👆 ========================================================== 👆
                     }
                     else
                     {
