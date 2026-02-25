@@ -118,10 +118,14 @@ namespace ROCAPointBot
                     .AddChoice("憲兵", "13549943")
                     .AddChoice("裝甲", "13662982")
                     .AddChoice("航特", "16223475"))
-                // 👇 將這裡的 admin_role 拆成三個選項
-                .AddOption("admin_role_1", ApplicationCommandOptionType.Role, "主要管理身分組", isRequired: true)
-                .AddOption("admin_role_2", ApplicationCommandOptionType.Role, "國防部身份組 (選填)", isRequired: false)
-                .AddOption("admin_role_3", ApplicationCommandOptionType.Role, "參謀本部身份組 (選填)", isRequired: false)
+                // 👇 擴充至 7 個管理身分組選項
+                .AddOption("admin_role_1", ApplicationCommandOptionType.Role, "主要管理身分組 (刪除資料或異常時僅會 Ping 此身分組)", isRequired: true)
+                .AddOption("admin_role_2", ApplicationCommandOptionType.Role, "管理身分組 2 (選填，擁有指令查詢權限)", isRequired: false)
+                .AddOption("admin_role_3", ApplicationCommandOptionType.Role, "管理身分組 3 (選填，擁有指令查詢權限)", isRequired: false)
+                .AddOption("admin_role_4", ApplicationCommandOptionType.Role, "管理身分組 4 (選填)", isRequired: false)
+                .AddOption("admin_role_5", ApplicationCommandOptionType.Role, "管理身分組 5 (選填)", isRequired: false)
+                .AddOption("admin_role_6", ApplicationCommandOptionType.Role, "管理身分組 6 (選填)", isRequired: false)
+                .AddOption("admin_role_7", ApplicationCommandOptionType.Role, "管理身分組 7 (選填)", isRequired: false)
                 .Build(),
                 new SlashCommandBuilder().WithName("sync-members").WithDescription("🔄 手動同步 Roblox 群組的最新成員至資料庫").Build(),
                 new SlashCommandBuilder().WithName("points").WithDescription("📊 查詢點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
@@ -187,15 +191,23 @@ namespace ROCAPointBot
                             if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
                             string rId = (string)command.Data.Options.First(x => x.Name == "roblox_group_id").Value;
 
-                            // 👇 讀取最多三個身分組
+                            // 👇 讀取最多七個身分組
                             var role1 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_1")?.Value;
                             var role2 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_2")?.Value;
                             var role3 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_3")?.Value;
+                            var role4 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_4")?.Value;
+                            var role5 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_5")?.Value;
+                            var role6 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_6")?.Value;
+                            var role7 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "admin_role_7")?.Value;
 
                             var roleIds = new List<ulong>();
                             if (role1 != null) roleIds.Add(role1.Id);
                             if (role2 != null) roleIds.Add(role2.Id);
                             if (role3 != null) roleIds.Add(role3.Id);
+                            if (role4 != null) roleIds.Add(role4.Id);
+                            if (role5 != null) roleIds.Add(role5.Id);
+                            if (role6 != null) roleIds.Add(role6.Id);
+                            if (role7 != null) roleIds.Add(role7.Id);
                             string roleIdsStr = string.Join(",", roleIds); // 轉成逗號分隔字串
 
                             string newCode = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpper();
