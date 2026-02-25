@@ -91,7 +91,8 @@ namespace ROCAPointBot
                     }
                     catch (Exception ex) { Console.WriteLine($"⚠️ 建立 AdminChannels 資料表失敗: {ex.Message}"); }
                     // 👆 ================================================== 👆
-
+                    // 👇 新增這行：自動替現有的 AdminChannels 加上身分組欄位
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE AdminChannels ADD MndAdminRoleId decimal(20,0) NULL"); } catch { }
                     Console.WriteLine("✅ 資料庫連線成功並已準備就緒！");
                 }
                 catch (Exception ex)
@@ -118,8 +119,8 @@ namespace ROCAPointBot
                     .AddChoice("航特", "16223475"))
                 // 👇 將這裡的 admin_role 拆成三個選項
                 .AddOption("admin_role_1", ApplicationCommandOptionType.Role, "主要管理身分組", isRequired: true)
-                .AddOption("admin_role_2", ApplicationCommandOptionType.Role, "管理身分組 2 (選填)", isRequired: false)
-                .AddOption("admin_role_3", ApplicationCommandOptionType.Role, "管理身分組 3 (選填)", isRequired: false)
+                .AddOption("admin_role_2", ApplicationCommandOptionType.Role, "國防部身份組 (選填)", isRequired: false)
+                .AddOption("admin_role_3", ApplicationCommandOptionType.Role, "參謀本部身份組 (選填)", isRequired: false)
                 .Build(),
                 new SlashCommandBuilder().WithName("sync-members").WithDescription("🔄 手動同步 Roblox 群組的最新成員至資料庫").Build(),
                 new SlashCommandBuilder().WithName("points").WithDescription("📊 查詢點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
@@ -137,7 +138,11 @@ namespace ROCAPointBot
                 // 👇 新增這行：註冊 status 指令
                 new SlashCommandBuilder().WithName("status").WithDescription("🟢 檢查機器人目前連線與運作狀態").Build(),
                 // 👇 新增這兩個指令
-                new SlashCommandBuilder().WithName("admin-setup").WithDescription("🔒 國防部專用：將此頻道設為 Admin 頻道以監控其他單位").AddOption("server_codes", ApplicationCommandOptionType.String, "要監控的伺服器編號(多個用逗號分隔，如 A1B2,C3D4)", isRequired: true).Build(),
+                 new SlashCommandBuilder().WithName("admin-setup")
+                .WithDescription("🔒 國防部專用：設定監控頻道與授權身分組")
+                .AddOption("server_codes", ApplicationCommandOptionType.String, "要監控的伺服器編號(多個用逗號分隔，如 A1B2,C3D4)", isRequired: true)
+                .AddOption("mnd_role", ApplicationCommandOptionType.Role, "設定可以使用 /admin-view 的長官身分組", isRequired: true)
+                .Build(),
                 new SlashCommandBuilder().WithName("admin-view").WithDescription("👁️ 國防部專用：查看特定單位的總排行榜").AddOption("server_code", ApplicationCommandOptionType.String, "目標伺服器編號", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("my-code").WithDescription("🔑 查詢本伺服器的專屬資料庫編號 (交給國防部綁定通知用)").Build(),
                 new SlashCommandBuilder().WithName("removepoint")
@@ -346,11 +351,12 @@ namespace ROCAPointBot
                                             $">  **紀錄編號：{newLog.Id}**";  // 這裡也修正為 {newLog.Id}
                             await command.FollowupAsync(addMsg);
 
+                            bool isAnomaly = pts >= 100; // 判斷是否大於等於 100
                             _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 已發放點數\n" +
                                         $">  **被登記人：{name}獲得 {pts} 點**\n" +
                                         $">  **目前總計：{rec.Points} 點**\n" +
                                         $">  **備註：{reason}**\n" +
-                                        $">  **紀錄編號**：**{newLog.Id}** (若需撤銷請使用 /del-record)");
+                                        $">  **紀錄編號**：**{newLog.Id}** (若需撤銷請使用 /del-record)", isAnomaly);
                             break;
                         }
                     case "removepoint":
@@ -396,11 +402,12 @@ namespace ROCAPointBot
                             await command.FollowupAsync(removeMsg);
 
                             // 推播給總部
+                            bool isAnomaly = pts >= 100; // 判斷是否大於等於 100
                             _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 已扣除點數\n" +
                                         $">  被登記人：**{name}** 扣除 **{pts}** 點\n" +
                                         $">  目前剩餘：**{rec.Points}** 點\n" +
                                         $">  備註：{reason}\n" +
-                                        $">  紀錄編號：**{newLog.Id}**");
+                                        $">  紀錄編號：**{newLog.Id}**", isAnomaly);
                             break;
                         }
                     case "status":
@@ -486,8 +493,8 @@ namespace ROCAPointBot
 
                             await command.FollowupAsync(delMsg);
 
-                            // 同步推播給總部的訊息也加上原因
-                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣除 {targetLog.PointsAdded} 點。\n>  人員：{targetLog.RobloxUsername}\n>  扣除原因：{delReason}\n>  剩餘：{currentPoints}點");
+                            bool isAnomaly = Math.Abs(targetLog.PointsAdded) >= 100; // 拿絕對值判斷是否大於等於 100
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，撤銷了 {targetLog.PointsAdded} 點的變動。\n>  人員：{targetLog.RobloxUsername}\n>  撤銷原因：{delReason}\n>  剩餘：{currentPoints}點", isAnomaly);
                             break;
                         }
 
@@ -528,6 +535,7 @@ namespace ROCAPointBot
                                 .WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
 
                             await command.FollowupAsync("⚠️ **【資料清空請求】** 確定要清空所有資料嗎？\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
+
                             break;
                         }
 
@@ -553,17 +561,33 @@ namespace ROCAPointBot
 
                     case "admin-setup":
                         {
-                            if (botConfig == null) { await command.FollowupAsync("❌ 請先在伺服器使用 `/setup-roca` 完成基本設定。"); return; }
-                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 權限不足！只有設定好的 Admin 身分組可以設定監控頻道。"); return; }
+                            // 你的專屬開發者 ID
+                            ulong developerId = 1018018187318673471;
 
-                            string codes = ((string)command.Data.Options.First().Value).ToUpper();
+                            // 只有 Discord 最高管理員「或是」你本人可以設定這個頻道
+                            if (!((SocketGuildUser)command.User).GuildPermissions.Administrator && command.User.Id != developerId)
+                            {
+                                await command.FollowupAsync("❌ 權限不足！只有本伺服器的「Discord 伺服器管理員」或「系統開發者」可以進行初步設定。");
+                                return;
+                            }
+
+                            string codes = ((string)command.Data.Options.First(x => x.Name == "server_codes").Value).ToUpper();
+                            var mndRole = (SocketRole)command.Data.Options.First(x => x.Name == "mnd_role").Value;
+
                             var adminChannel = await db.AdminChannels.FindAsync(command.Channel.Id);
 
-                            if (adminChannel == null) db.AdminChannels.Add(new AdminChannelConfig { ChannelId = command.Channel.Id, GuildId = gid, TargetServerCodes = codes });
-                            else adminChannel.TargetServerCodes = codes;
+                            if (adminChannel == null)
+                            {
+                                db.AdminChannels.Add(new AdminChannelConfig { ChannelId = command.Channel.Id, GuildId = gid, TargetServerCodes = codes, MndAdminRoleId = mndRole.Id });
+                            }
+                            else
+                            {
+                                adminChannel.TargetServerCodes = codes;
+                                adminChannel.MndAdminRoleId = mndRole.Id;
+                            }
 
                             await db.SaveChangesAsync();
-                            await command.FollowupAsync($"✅ **已將此頻道設為 Admin 監控頻道！**\n📡 目前授權監控的單位編號：`{codes}`\n(只要這些單位資料庫有變動，就會自動回傳至此頻道)");
+                            await command.FollowupAsync($"✅ **已將此頻道設為國防部推播頻道！**\n📡 授權監控的單位編號：`{codes}`\n👮 授權查詢身分組：<@&{mndRole.Id}>\n> *(擁有該身分組的長官，現在可以在此頻道使用 `/admin-view` 指令查詢各單位排行榜了！)*");
                             break;
                         }
 
@@ -571,6 +595,16 @@ namespace ROCAPointBot
                         {
                             var ac = await db.AdminChannels.FindAsync(command.Channel.Id);
                             if (ac == null) { await command.FollowupAsync("❌ 此頻道尚未被設定為 Admin 監控頻道。"); return; }
+
+                            // 👇 驗證使用者是否為伺服器管理員，或擁有國防部長官身分組
+                            var execUser = (SocketGuildUser)command.User;
+                            bool hasMndRole = ac.MndAdminRoleId.HasValue && execUser.Roles.Any(r => r.Id == ac.MndAdminRoleId.Value);
+
+                            if (!execUser.GuildPermissions.Administrator && !hasMndRole)
+                            {
+                                await command.FollowupAsync("❌ 權限不足！您沒有被授權使用總部查詢指令。");
+                                return;
+                            }
 
                             string targetCode = ((string)command.Data.Options.First().Value).ToUpper();
                             if (!ac.TargetServerCodes.Contains(targetCode)) { await command.FollowupAsync($"❌ 此頻道未被授權查看編號 `{targetCode}` 的資料庫。"); return; }
@@ -698,7 +732,7 @@ namespace ROCAPointBot
                             $"> 該單位的負責人已執行了 **清空所有成員點數** 的操作！\n" +
                             $"> 授權執行者一：**{firstAdminName}**\n" +
                             $"> 授權執行者二：**{secondAdminName}**\n" +
-                            $"> 狀態：資料庫點數已全數歸零。");
+                            $"> 狀態：資料庫點數已全數歸零。", true); // 👈 這裡加上 true
                         // 👆 ========================================================== 👆
                     }
                     else
@@ -823,7 +857,7 @@ namespace ROCAPointBot
             return user.Roles.Any(r => r.Id == config.AdminRoleId);
         }
 
-        private async Task BroadcastToAdminChannelsAsync(ulong sourceGuildId, string message)
+        private async Task BroadcastToAdminChannelsAsync(ulong sourceGuildId, string message, bool isAnomaly = false)
         {
             using var db = new BotDbContext(_configuration);
             var sourceConfig = await db.Configs.FindAsync(sourceGuildId);
@@ -836,7 +870,15 @@ namespace ROCAPointBot
                 {
                     try
                     {
-                        await localChannel.SendMessageAsync($"📜 **[點數變動通知]**\n> {message}");
+                        // 如果是異常大額變動，就用紅燈警告並 Ping 管理員 1 (AdminRoleId)
+                        if (isAnomaly)
+                        {
+                            await localChannel.SendMessageAsync($"🚨 **【點數變動異常通知】** <@&{sourceConfig.AdminRoleId}>\n> {message}");
+                        }
+                        else
+                        {
+                            await localChannel.SendMessageAsync($"📜 **[點數變動通知]**\n> {message}");
+                        }
                     }
                     catch { /* 如果機器人沒有該頻道的發言權限，則安全忽略 */ }
                 }
@@ -917,5 +959,8 @@ namespace ROCAPointBot
         public ulong ChannelId { get; set; }
         public ulong GuildId { get; set; }
         public string TargetServerCodes { get; set; } // 存放要監控的編號，例如 "A1B2C,X9Y8Z"
+
+        // 👇 新增這行：儲存國防部專屬查詢身分組 ID
+        public ulong? MndAdminRoleId { get; set; }
     }
 }
