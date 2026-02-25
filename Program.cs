@@ -282,18 +282,18 @@ namespace ROCAPointBot
                             await db.SaveChangesAsync();
 
                             // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
-                            string addMsg = $"###  [點數發放] 負責人：**{command.User.Username}**\n" +
-                                            $"###  成功發放 **{pts}** 點給 **{name}**\n" +
-                                            $"###  目前總計：**{rec.Points}** 點\n" +
-                                            $"####  備註：{reason} \n" +
-                                            $"####  紀錄編號：{newLog.Id}";  // 這裡也修正為 {newLog.Id}
+                            string addMsg = $">  [點數發放] 負責人：**{command.User.Username}**\n" +
+                                            $">  成功發放 **{pts}** 點給 **{name}**\n" +
+                                            $">  目前總計：**{rec.Points}** 點\n" +
+                                            $">  備註：{reason} \n" +
+                                            $">  紀錄編號：{newLog.Id}";  // 這裡也修正為 {newLog.Id}
                             await command.FollowupAsync(addMsg);
 
-                            _ = BroadcastToAdminChannelsAsync(gid, $"###  負責人 **{command.User.Username}** 已發放點數\n" +
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 已發放點數\n" +
                                         $">  被登記人：**{name}** 獲得 **{pts}** 點\n" +
                                         $">  目前總計：**{rec.Points}** 點\n" +
                                         $">  備註：{reason}\n" +
-                                        $"> 紀錄編號：**{newLog.Id}** (若需撤銷請使用 /del-record)");
+                                        $">  紀錄編號：**{newLog.Id}** (若需撤銷請使用 /del-record)");
                             break;
                         }
 
