@@ -72,6 +72,24 @@ namespace ROCAPointBot
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD ServerCode NVARCHAR(50) NULL"); } catch { }
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD MasterLogChannelId BIGINT NULL"); } catch { }
 
+                    // 👇 ================= 新增這段程式碼 ================= 👇
+                    // 自動嘗試建立 AdminChannels 資料表 (如果它不存在的話)
+                    try
+                    {
+                        await db.Database.ExecuteSqlRawAsync(@"
+                            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'AdminChannels')
+                            BEGIN
+                                CREATE TABLE AdminChannels (
+                                    ChannelId decimal(20,0) NOT NULL,
+                                    GuildId decimal(20,0) NOT NULL,
+                                    TargetServerCodes nvarchar(max) NOT NULL,
+                                    CONSTRAINT PK_AdminChannels PRIMARY KEY (ChannelId)
+                                )
+                            END");
+                    }
+                    catch (Exception ex) { Console.WriteLine($"⚠️ 建立 AdminChannels 資料表失敗: {ex.Message}"); }
+                    // 👆 ================================================== 👆
+
                     Console.WriteLine("✅ 資料庫連線成功並已準備就緒！");
                 }
                 catch (Exception ex)
