@@ -87,7 +87,16 @@ namespace ROCAPointBot
         {
             var commands = new List<ApplicationCommandProperties>
             {
-                new SlashCommandBuilder().WithName("setup-roca").WithDescription("🔗 綁定 Roblox 群組並自動同步成員").AddOption("roblox_group_id", ApplicationCommandOptionType.String, "Roblox 群組 ID", isRequired: true).AddOption("admin_role", ApplicationCommandOptionType.Role, "管理身分組", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("setup-roca").WithDescription("🔗 綁定 Roblox 群組並自動同步成員")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("roblox_group_id")
+                    .WithDescription("選擇綁定單位")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true)
+                    .AddChoice("憲兵", "13549943")
+                    .AddChoice("裝甲", "13662982")
+                    .AddChoice("航特", "16223475"))
+                .AddOption("admin_role", ApplicationCommandOptionType.Role, "管理身分組", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("sync-members").WithDescription("🔄 手動同步 Roblox 群組的最新成員至資料庫").Build(),
                 new SlashCommandBuilder().WithName("points").WithDescription("📊 查詢點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("addpoint").WithDescription("➕ 發放點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).AddOption("points", ApplicationCommandOptionType.Integer, "點數數量", isRequired: true).AddOption("reason", ApplicationCommandOptionType.String, "原因備註", isRequired: true).Build(),
@@ -129,266 +138,312 @@ namespace ROCAPointBot
                 switch (command.Data.Name)
                 {
                     case "setup-roca":
-                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-                        string rId = (string)command.Data.Options.First(x => x.Name == "roblox_group_id").Value;
-                        var rRole = (SocketRole)command.Data.Options.First(x => x.Name == "admin_role").Value;
-
-                        // 產生 5 碼隨機大寫英數作為伺服器專屬編號
-                        string newCode = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpper();
-
-                        if (botConfig == null)
                         {
-                            botConfig = new BotConfig { GuildId = gid, RobloxGroupId = rId, AdminRoleId = rRole.Id, ServerCode = newCode };
-                            db.Configs.Add(botConfig);
-                        }
-                        else
-                        {
-                            botConfig.RobloxGroupId = rId; botConfig.AdminRoleId = rRole.Id;
-                            if (string.IsNullOrEmpty(botConfig.ServerCode)) botConfig.ServerCode = newCode;
-                        }
-                        await db.SaveChangesAsync();
+                            if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+                            string rId = (string)command.Data.Options.First(x => x.Name == "roblox_group_id").Value;
+                            var rRole = (SocketRole)command.Data.Options.First(x => x.Name == "admin_role").Value;
 
-                        await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。\n🔑 **本伺服器專屬資料庫編號：`{botConfig.ServerCode}`** (請妥善保存，交給國防部設定 Admin 頻道使用)。\n正在背景抓取群組成員，請稍候...");
-                        int addedCount = await SyncGroupMembersAsync(db, gid, rId);
+                            string newCode = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpper();
 
-                        await command.Channel.SendMessageAsync($"🔄 群組名單同步完成！共為排行榜新增了 **{addedCount}** 位新成員 (預設為 0 點)。");
-                        break;
+                            if (botConfig == null)
+                            {
+                                botConfig = new BotConfig { GuildId = gid, RobloxGroupId = rId, AdminRoleId = rRole.Id, ServerCode = newCode };
+                                db.Configs.Add(botConfig);
+                            }
+                            else
+                            {
+                                botConfig.RobloxGroupId = rId; botConfig.AdminRoleId = rRole.Id;
+                                if (string.IsNullOrEmpty(botConfig.ServerCode)) botConfig.ServerCode = newCode;
+                            }
+                            await db.SaveChangesAsync();
 
-                    case "sync-members":
-                        if (botConfig == null) { await command.FollowupAsync("❌ 請先使用 `/setup-roca` 綁定群組。"); return; }
-                        if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足。"); return; }
-
-                        await command.FollowupAsync("⏳ 正在與 Roblox 同步群組成員名單...");
-                        int newMembers = await SyncGroupMembersAsync(db, gid, botConfig.RobloxGroupId);
-                        await command.FollowupAsync($"✅ 同步完成！本次共新增了 **{newMembers}** 位新成員。");
-                        break;
-                    case "my-code":
-                        if (botConfig == null || string.IsNullOrEmpty(botConfig.ServerCode))
-                        {
-                            await command.FollowupAsync("❌ 本伺服器尚未完成設定。請先使用 `/setup-roca` 進行綁定。");
+                            await command.FollowupAsync($"✅ 已綁定 Roblox 群組 `{rId}`。\n🔑 **本伺服器專屬資料庫編號：`{botConfig.ServerCode}`** (請妥善保存，交給國防部設定 Admin 頻道使用)。\n正在背景抓取群組成員，請稍候...");
+                            var syncResult = await SyncGroupMembersAsync(db, gid, rId);
+                            await command.Channel.SendMessageAsync($"🔄 群組名單同步完成！\n> 🟢 新增了 **{syncResult.added}** 位新成員 (預設為 0 點)\n> 🔴 移除了 **{syncResult.removed}** 位已退群或不符資格成員。");
                             break;
                         }
 
-                        // 權限檢查：只有綁定的 Admin 身分組，或是伺服器管理員可以查詢編號
-                        var myCodeExec = (SocketGuildUser)command.User;
-                        bool isCodeAdmin = myCodeExec.Roles.Any(r => r.Id == botConfig.AdminRoleId) || myCodeExec.GuildPermissions.Administrator;
-
-                        if (!isCodeAdmin)
+                    case "sync-members":
                         {
-                            await command.FollowupAsync("❌ 權限不足！只有管理員可以查詢伺服器專屬編號。");
-                            return;
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先使用 `/setup-roca` 綁定群組。"); return; }
+                            if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足。"); return; }
+
+                            await command.FollowupAsync("⏳ 正在與 Roblox 同步群組成員名單...");
+                            var syncResult = await SyncGroupMembersAsync(db, gid, botConfig.RobloxGroupId);
+                            await command.FollowupAsync($"✅ 同步完成！\n> 🟢 本次共新增了 **{syncResult.added}** 位新成員\n> 🔴 移除了 **{syncResult.removed}** 位已退群或不符資格成員。");
+                            break;
                         }
 
-                        await command.FollowupAsync($"🔑 **本伺服器專屬資料庫編號為：** `{botConfig.ServerCode}`\n> 請將此編號交給國防部，以便國防部進行跨伺服器監控設定。");
-                        break;
-                    case "viewall":
-                        var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
-                        if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
-
-                        var chunks = new List<string>();
-                        // 改用 ansi 區塊
-                        var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```ansi\n");
-
-                        int rankIndex = 1;
-                        foreach (var u in all)
+                    case "my-code":
                         {
-                            // 1. 先做純文字對齊
-                            string rankRaw = $"[{rankIndex}]".PadRight(5);
-                            string nameRaw = u.RobloxUsername.PadRight(20);
-                            string pointRaw = $"{u.Points} 點".PadLeft(8);
+                            if (botConfig == null || string.IsNullOrEmpty(botConfig.ServerCode))
+                            {
+                                await command.FollowupAsync("❌ 本伺服器尚未完成設定。請先使用 `/setup-roca` 進行綁定。");
+                                break;
+                            }
 
-                            // 2. 包上 ANSI 顏色代碼 (\u001b[代碼m) 
-                            // \u001b[34m 是藍色， \u001b[32m 是綠色， \u001b[0m 是重置回預設顏色
-                            string rankStr = $"\u001b[34m{rankRaw}\u001b[0m";
-                            string pointStr = $"\u001b[32m{pointRaw}\u001b[0m";
+                            var myCodeExec = (SocketGuildUser)command.User;
+                            bool isCodeAdmin = myCodeExec.Roles.Any(r => r.Id == botConfig.AdminRoleId) || myCodeExec.GuildPermissions.Administrator;
 
-                            string line = $"{rankStr} {nameRaw} ➔ {pointStr}\n";
+                            if (!isCodeAdmin)
+                            {
+                                await command.FollowupAsync("❌ 權限不足！只有管理員可以查詢伺服器專屬編號。");
+                                return;
+                            }
 
-                            if (currentChunk.Length + line.Length > 1900)
+                            await command.FollowupAsync($"🔑 **本伺服器專屬資料庫編號為：** `{botConfig.ServerCode}`\n> 請將此編號交給國防部，以便國防部進行跨伺服器監控設定。");
+                            break;
+                        }
+
+                    case "viewall":
+                        {
+                            var all = await db.UserPoints.Where(u => u.GuildId == gid).OrderByDescending(u => u.Points).ToListAsync();
+                            if (!all.Any()) { await command.FollowupAsync("📭 尚無資料。"); break; }
+
+                            var chunks = new List<string>();
+                            var currentChunk = new StringBuilder("##  點數總覽 (所有成員)\n```ansi\n");
+
+                            int rankIndex = 1;
+                            foreach (var u in all)
+                            {
+                                string rankRaw = $"[{rankIndex}]".PadRight(5);
+                                string nameRaw = u.RobloxUsername.PadRight(20);
+                                string pointRaw = $"{u.Points} 點".PadLeft(8);
+
+                                string rankStr = $"\u001b[34m{rankRaw}\u001b[0m";
+                                string pointStr = $"\u001b[32m{pointRaw}\u001b[0m";
+
+                                string line = $"{rankStr} {nameRaw} ➔ {pointStr}\n";
+
+                                if (currentChunk.Length + line.Length > 1900)
+                                {
+                                    currentChunk.AppendLine("```");
+                                    chunks.Add(currentChunk.ToString());
+                                    currentChunk.Clear();
+                                    currentChunk.AppendLine("```ansi\n");
+                                }
+                                currentChunk.Append(line);
+                                rankIndex++;
+                            }
+                            if (currentChunk.Length > 0)
                             {
                                 currentChunk.AppendLine("```");
                                 chunks.Add(currentChunk.ToString());
-                                currentChunk.Clear();
-                                currentChunk.AppendLine("```ansi\n"); // 這裡也要記得改為 ansi
                             }
-                            currentChunk.Append(line);
-                            rankIndex++;
-                        }
-                        if (currentChunk.Length > 0)
-                        {
-                            currentChunk.AppendLine("```"); // 補上最後的關閉標籤
-                            chunks.Add(currentChunk.ToString());
-                        }
 
-                        bool isFirst = true;
-                        foreach (var chunk in chunks)
-                        {
-                            if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
-                            else { await command.Channel.SendMessageAsync(chunk); }
+                            bool isFirst = true;
+                            foreach (var chunk in chunks)
+                            {
+                                if (isFirst) { await command.FollowupAsync(chunk); isFirst = false; }
+                                else { await command.Channel.SendMessageAsync(chunk); }
+                            }
+                            break;
                         }
-                        break;
 
                     case "addpoint":
-                        if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
-                        var exec = (SocketGuildUser)command.User;
-                        if (!exec.Roles.Any(r => r.Id == botConfig.AdminRoleId) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
-                        var user = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
-                        int pts = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
-                        string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
-                        string name = user.Nickname ?? user.Username;
-                        if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
-
-                        if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { await command.FollowupAsync($"❌ 玩家 `{name}` 不在指定的 Roblox 群組內，或名稱不相符。"); break; }
-
-                        var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
-                        if (rec == null) { rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 }; db.UserPoints.Add(rec); }
-                        rec.Points += pts;
-                        // 💡 將它們替換成以下程式碼：
-                        var newLog = new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() };
-                        db.PointLogs.Add(newLog);
-                        await db.SaveChangesAsync();
-
-                        // 資料庫儲存後，newLog.Id 會自動產生對應的編號
-                        _ = BroadcastToAdminChannelsAsync(gid, $"**{command.User.Username}** ✅ 已發放 **{pts}** 點給玩家 `{name}`。\n>  **紀錄編號：** `{newLog.Id}`\n>  **備註：** {reason} *(若需撤銷請使用 /del-record)*");
-
-                        break;
-
-                    // 👇 新增這個 case 區塊
-                    case "status":
-                        int latency = _client.Latency; // 取得 Discord WebSocket 延遲
-                        bool isDbConnected = await db.Database.CanConnectAsync(); // 再次確認資料庫狀態
-                        string dbStatusMsg = isDbConnected ? "✅ 正常連線" : "❌ 無法連線";
-
-                        string statusMessage = $"🟢 **ROCA Point Bot 運作正常！**\n" +
-                                               $"> 📡 **Discord 延遲 (Ping):** `{latency} ms`\n" +
-                                               $"> 🗄️ **資料庫狀態:** {dbStatusMsg}\n" +
-                                               $"> 🕒 **主機目前時間:** `{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}`";
-
-                        await command.FollowupAsync(statusMessage);
-                        break;
-                    case "history":
-                        var hUser = (SocketGuildUser)command.Data.Options.First().Value;
-                        string hName = hUser.Nickname ?? hUser.Username;
-                        if (hName.Contains("]")) hName = hName.Substring(hName.LastIndexOf(']') + 1).Trim();
-                        var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
-                        if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
-
-                        var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n```ansi\n"); // 改為 ansi
-                        foreach (var l in logs)
                         {
-                            // 1. 純文字對齊
-                            string idRaw = $"[ID: {l.Id}]".PadRight(9);
-                            string timeStr = l.Timestamp.ToString("MM/dd HH:mm");
-                            string ptsRaw = $"+{l.PointsAdded}".PadLeft(5);
-                            string adminStr = l.AdminName.PadRight(12);
+                            if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
+                            var exec = (SocketGuildUser)command.User;
+                            if (!exec.Roles.Any(r => r.Id == botConfig.AdminRoleId) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
 
-                            // 2. 上色
-                            string idStr = $"\u001b[34m{idRaw}\u001b[0m"; // 藍色 ID
+                            var user = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
+                            int pts = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
+                            string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
+                            string name = user.Nickname ?? user.Username;
+                            if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
 
-                            // 假設點數大於0用綠色，若未來有扣點(小於0)可以判斷用紅色 (\u001b[31m)
-                            string ptsStr = $"\u001b[32m{ptsRaw}\u001b[0m";
+                            if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { await command.FollowupAsync($"❌ 玩家 `{name}` 不在指定的 Roblox 群組內，或名稱不相符。"); break; }
 
-                            sb.AppendLine($"{idStr} \u001b[30m{timeStr}\u001b[0m | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
+                            var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
+                            if (rec == null) { rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 }; db.UserPoints.Add(rec); }
+
+                            rec.Points += pts;
+
+                            var newLog = new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() };
+                            db.PointLogs.Add(newLog);
+                            await db.SaveChangesAsync();
+
+                            string addMsg = $" **[點數發放]** 負責人：**{command.User.Username}**\n" +
+                                            $"> 成功發放了 `{pts}` 點給 `{name}`！\n" +
+                                            $">  **目前總計：`{rec.Points}` 點**\n" +
+                                            $">  備註：{reason}";
+                            await command.FollowupAsync(addMsg);
+
+                            _ = BroadcastToAdminChannelsAsync(gid, $"**{command.User.Username}** ✅ 已發放 **{pts}** 點給玩家 `{name}`。\n>  **紀錄編號：** `{newLog.Id}`\n>  **目前總計：** `{rec.Points}` 點\n>  **備註：** {reason} *(若需撤銷請使用 /del-record)*");
+                            break;
                         }
-                        sb.AppendLine("```");
-                        await command.FollowupAsync(sb.ToString());
-                        break;
+
+                    case "status":
+                        {
+                            int latency = _client.Latency;
+                            bool isDbConnected = await db.Database.CanConnectAsync();
+                            string dbStatusMsg = isDbConnected ? "✅ 正常連線" : "❌ 無法連線";
+
+                            string statusMessage = $"🟢 **ROCA Point Bot 運作正常！**\n" +
+                                                   $">  **Discord 延遲 (Ping):** `{latency} ms`\n" +
+                                                   $">  **資料庫狀態:** {dbStatusMsg}\n" +
+                                                   $">  **主機目前時間:** `{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}`";
+
+                            await command.FollowupAsync(statusMessage);
+                            break;
+                        }
+
+                    case "history":
+                        {
+                            var hUser = (SocketGuildUser)command.Data.Options.First().Value;
+                            string hName = hUser.Nickname ?? hUser.Username;
+                            if (hName.Contains("]")) hName = hName.Substring(hName.LastIndexOf(']') + 1).Trim();
+                            var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == hName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
+                            if (!logs.Any()) { await command.FollowupAsync("📭 查無紀錄。"); break; }
+
+                            var sb = new StringBuilder($"###  **{hName}** 的近期紀錄\n```ansi\n");
+                            foreach (var l in logs)
+                            {
+                                string idRaw = $"[ID: {l.Id}]".PadRight(9);
+                                string timeStr = l.Timestamp.ToString("MM/dd HH:mm");
+                                string ptsRaw = $"+{l.PointsAdded}".PadLeft(5);
+                                string adminStr = l.AdminName.PadRight(12);
+
+                                string idStr = $"\u001b[34m{idRaw}\u001b[0m";
+                                string ptsStr = $"\u001b[32m{ptsRaw}\u001b[0m";
+
+                                sb.AppendLine($"{idStr} \u001b[30m{timeStr}\u001b[0m | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
+                            }
+                            sb.AppendLine("```");
+                            await command.FollowupAsync(sb.ToString());
+                            break;
+                        }
 
                     case "del-record":
-                        if (botConfig == null) { await command.FollowupAsync("⚠️ 請先設定。"); return; }
-                        if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足。"); return; }
-                        int logId = Convert.ToInt32((long)command.Data.Options.First().Value);
-                        var targetLog = await db.PointLogs.FirstOrDefaultAsync(l => l.Id == logId && l.GuildId == gid);
-                        if (targetLog == null || targetLog.IsDeleted) { await command.FollowupAsync("❌ 找不到該紀錄。"); break; }
-                        var uPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetLog.RobloxUsername.ToLower());
-                        if (uPoint != null) uPoint.Points = Math.Max(0, uPoint.Points - targetLog.PointsAdded);
-                        targetLog.IsDeleted = true;
-                        await db.SaveChangesAsync();
-                        _ = BroadcastToAdminChannelsAsync(gid, $"**{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣回了 `{targetLog.PointsAdded}` 點。\n>  人員：`{targetLog.RobloxUsername}`");
-                        break;
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("⚠️ 請先設定。"); return; }
+                            if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足。"); return; }
+
+                            int logId = Convert.ToInt32((long)command.Data.Options.First().Value);
+                            var targetLog = await db.PointLogs.FirstOrDefaultAsync(l => l.Id == logId && l.GuildId == gid);
+
+                            if (targetLog == null || targetLog.IsDeleted) { await command.FollowupAsync("❌ 找不到該紀錄或已經被撤銷過了。"); break; }
+
+                            var uPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetLog.RobloxUsername.ToLower());
+
+                            int currentPoints = 0;
+
+                            if (uPoint != null)
+                            {
+                                uPoint.Points = Math.Max(0, uPoint.Points - targetLog.PointsAdded);
+                                currentPoints = uPoint.Points;
+                            }
+
+                            targetLog.IsDeleted = true;
+                            targetLog.Reason += $" (已由 {command.User.Username} 撤銷)";
+
+                            await db.SaveChangesAsync();
+
+                            string delMsg = $" **[紀錄撤銷]** 負責人：**{command.User.Username}**\n" +
+                                            $"> 成功撤銷了紀錄 `#{logId}`！\n" +
+                                            $">  被扣點人：`{targetLog.RobloxUsername}`\n" +
+                                            $">  已扣除：`{targetLog.PointsAdded}` 點\n" +
+                                            $">  **目前剩餘：`{currentPoints}` 點**";
+
+                            await command.FollowupAsync(delMsg);
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣回了 `{targetLog.PointsAdded}` 點。\n>  人員：`{targetLog.RobloxUsername}`\n>  剩餘：`{currentPoints}` 點");
+                            break;
+                        }
 
                     case "daily-records":
-                        string dateStr = (string)command.Data.Options.First().Value;
-                        if (!DateTime.TryParse(dateStr, out DateTime dt)) { await command.FollowupAsync("❌ 日期格式錯誤。"); break; }
-                        var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
-                        if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
-
-                        // 把原本的 ```md 改成純文字區塊 ```text
-                        var dSb = new StringBuilder($"#  {dt:yyyy-MM-dd} 發放紀錄清單\n```text\n");
-                        foreach (var l in dLogs)
                         {
-                            string idStr = $"[ID: {l.Id}]".PadRight(9);
-                            string timeStr = l.Timestamp.ToString("HH:mm");
-                            string nameStr = l.RobloxUsername.PadRight(18);
-                            string ptsStr = $"+{l.PointsAdded}".PadLeft(5);
-                            string adminStr = l.AdminName.PadRight(12);
+                            string dateStr = (string)command.Data.Options.First().Value;
+                            if (!DateTime.TryParse(dateStr, out DateTime dt)) { await command.FollowupAsync("❌ 日期格式錯誤。"); break; }
+                            var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
+                            if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
 
-                            dSb.AppendLine($"{idStr} {timeStr} | {nameStr} ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
+                            var dSb = new StringBuilder($"#  {dt:yyyy-MM-dd} 發放紀錄清單\n```text\n");
+                            foreach (var l in dLogs)
+                            {
+                                string idStr = $"[ID: {l.Id}]".PadRight(9);
+                                string timeStr = l.Timestamp.ToString("HH:mm");
+                                string nameStr = l.RobloxUsername.PadRight(18);
+                                string ptsStr = $"+{l.PointsAdded}".PadLeft(5);
+                                string adminStr = l.AdminName.PadRight(12);
+
+                                dSb.AppendLine($"{idStr} {timeStr} | {nameStr} ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
+                            }
+                            dSb.AppendLine("```");
+                            await command.FollowupAsync(dSb.ToString());
+                            break;
                         }
-                        dSb.AppendLine("```");
-                        await command.FollowupAsync(dSb.ToString());
-                        break;
 
                     case "clear-all-data":
-                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員。"); return; }
-                        var btns = new ComponentBuilder().WithButton("確認刪除 (1/2)", $"clear_step1_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-                        await command.FollowupAsync("⚠️ **【第一層確認】** 確定要清空所有資料嗎？", components: btns.Build());
-                        break;
+                        {
+                            if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員。"); return; }
+                            var btns = new ComponentBuilder().WithButton("確認刪除 (1/2)", $"clear_step1_{gid}", ButtonStyle.Danger).WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+                            await command.FollowupAsync("⚠️ **【第一層確認】** 確定要清空所有資料嗎？", components: btns.Build());
+                            break;
+                        }
 
                     case "unbind-roca":
-                        if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-                        if (botConfig != null) { db.Configs.Remove(botConfig); await db.SaveChangesAsync(); await command.FollowupAsync("🔓 已成功解除本伺服器的設定。"); }
-                        else { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); }
-                        break;
+                        {
+                            if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+                            if (botConfig != null) { db.Configs.Remove(botConfig); await db.SaveChangesAsync(); await command.FollowupAsync("🔓 已成功解除本伺服器的設定。"); }
+                            else { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); }
+                            break;
+                        }
 
                     case "points":
-                        var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
-                        string targetName = targetUser.Nickname ?? targetUser.Username;
-                        if (targetName.Contains("]")) targetName = targetName.Substring(targetName.LastIndexOf(']') + 1).Trim();
-                        var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetName.ToLower());
-                        int currentPoints = userPoint != null ? userPoint.Points : 0;
-                        await command.FollowupAsync($"📊 **{targetName}** 目前擁有 **{currentPoints}** 點。");
-                        break;
+                        {
+                            var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
+                            string targetName = targetUser.Nickname ?? targetUser.Username;
+                            if (targetName.Contains("]")) targetName = targetName.Substring(targetName.LastIndexOf(']') + 1).Trim();
+                            var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetName.ToLower());
+                            int currentPoints = userPoint != null ? userPoint.Points : 0;
+                            await command.FollowupAsync($"📊 **{targetName}** 目前擁有 **{currentPoints}** 點。");
+                            break;
+                        }
+
                     case "admin-setup":
-                        if (botConfig == null) { await command.FollowupAsync("❌ 請先在伺服器使用 `/setup-roca` 完成基本設定。"); return; }
-                        if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足！只有設定好的 Admin 身分組可以設定監控頻道。"); return; }
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先在伺服器使用 `/setup-roca` 完成基本設定。"); return; }
+                            if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足！只有設定好的 Admin 身分組可以設定監控頻道。"); return; }
 
-                        string codes = ((string)command.Data.Options.First().Value).ToUpper();
-                        var adminChannel = await db.AdminChannels.FindAsync(command.Channel.Id);
+                            string codes = ((string)command.Data.Options.First().Value).ToUpper();
+                            var adminChannel = await db.AdminChannels.FindAsync(command.Channel.Id);
 
-                        if (adminChannel == null) db.AdminChannels.Add(new AdminChannelConfig { ChannelId = command.Channel.Id, GuildId = gid, TargetServerCodes = codes });
-                        else adminChannel.TargetServerCodes = codes;
+                            if (adminChannel == null) db.AdminChannels.Add(new AdminChannelConfig { ChannelId = command.Channel.Id, GuildId = gid, TargetServerCodes = codes });
+                            else adminChannel.TargetServerCodes = codes;
 
-                        await db.SaveChangesAsync();
-                        await command.FollowupAsync($"✅ **已將此頻道設為 Admin 監控頻道！**\n📡 目前授權監控的單位編號：`{codes}`\n(只要這些單位資料庫有變動，就會自動回傳至此頻道)");
-                        break;
+                            await db.SaveChangesAsync();
+                            await command.FollowupAsync($"✅ **已將此頻道設為 Admin 監控頻道！**\n📡 目前授權監控的單位編號：`{codes}`\n(只要這些單位資料庫有變動，就會自動回傳至此頻道)");
+                            break;
+                        }
 
                     case "admin-view":
-                        var ac = await db.AdminChannels.FindAsync(command.Channel.Id);
-                        if (ac == null) { await command.FollowupAsync("❌ 此頻道尚未被設定為 Admin 監控頻道。"); return; }
-
-                        string targetCode = ((string)command.Data.Options.First().Value).ToUpper();
-                        if (!ac.TargetServerCodes.Contains(targetCode)) { await command.FollowupAsync($"❌ 此頻道未被授權查看編號 `{targetCode}` 的資料庫。"); return; }
-
-                        var targetConfig = await db.Configs.FirstOrDefaultAsync(c => c.ServerCode == targetCode);
-                        if (targetConfig == null) { await command.FollowupAsync("❌ 找不到該編號的伺服器，請確認單位是否已綁定機器人。"); return; }
-
-                        var targetData = await db.UserPoints.Where(u => u.GuildId == targetConfig.GuildId).OrderByDescending(u => u.Points).ToListAsync();
-                        if (!targetData.Any()) { await command.FollowupAsync($"📭 目標編號 `{targetCode}` 尚無成員資料。"); break; }
-
-                        var targetSb = new StringBuilder($"## 👁️ 國防部查閱：單位 [{targetCode}] 點數總覽\n```ansi\n");
-                        int tRank = 1;
-                        foreach (var u in targetData)
                         {
-                            string tRankStr = $"\u001b[34m[{tRank}]\u001b[0m".PadRight(14);
-                            string tPointStr = $"\u001b[32m{u.Points} 點\u001b[0m".PadLeft(17);
-                            targetSb.AppendLine($"{tRankStr} {u.RobloxUsername.PadRight(20)} ➔ {tPointStr}");
-                            tRank++;
-                            if (targetSb.Length > 1800) break; // 避免訊息過長，Admin 查閱預設先顯示前幾名
+                            var ac = await db.AdminChannels.FindAsync(command.Channel.Id);
+                            if (ac == null) { await command.FollowupAsync("❌ 此頻道尚未被設定為 Admin 監控頻道。"); return; }
+
+                            string targetCode = ((string)command.Data.Options.First().Value).ToUpper();
+                            if (!ac.TargetServerCodes.Contains(targetCode)) { await command.FollowupAsync($"❌ 此頻道未被授權查看編號 `{targetCode}` 的資料庫。"); return; }
+
+                            var targetConfig = await db.Configs.FirstOrDefaultAsync(c => c.ServerCode == targetCode);
+                            if (targetConfig == null) { await command.FollowupAsync("❌ 找不到該編號的伺服器，請確認單位是否已綁定機器人。"); return; }
+
+                            var targetData = await db.UserPoints.Where(u => u.GuildId == targetConfig.GuildId).OrderByDescending(u => u.Points).ToListAsync();
+                            if (!targetData.Any()) { await command.FollowupAsync($"📭 目標編號 `{targetCode}` 尚無成員資料。"); break; }
+
+                            var targetSb = new StringBuilder($"## 👁️ 國防部查閱：單位 [{targetCode}] 點數總覽\n```ansi\n");
+                            int tRank = 1;
+                            foreach (var u in targetData)
+                            {
+                                string tRankStr = $"\u001b[34m[{tRank}]\u001b[0m".PadRight(14);
+                                string tPointStr = $"\u001b[32m{u.Points} 點\u001b[0m".PadLeft(17);
+                                targetSb.AppendLine($"{tRankStr} {u.RobloxUsername.PadRight(20)} ➔ {tPointStr}");
+                                tRank++;
+                                if (targetSb.Length > 1800) break;
+                            }
+                            targetSb.AppendLine("```");
+                            await command.FollowupAsync(targetSb.ToString());
+                            break;
                         }
-                        targetSb.AppendLine("```");
-                        await command.FollowupAsync(targetSb.ToString());
-                        break;
                 }
             }
             catch (Exception ex)
@@ -427,23 +482,17 @@ namespace ROCAPointBot
             }
         }
 
-        private async Task<int> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
+        // 💡 回傳型態改為 (int added, int removed)
+        private async Task<(int added, int removed)> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
         {
-            // 🌟 新增：根據綁定的群組 ID 決定最高 Rank 限制
-            int maxRank = 255; // 預設最高值 (若未來綁定其他群組的防呆預設)
+            int maxRank = 255;
             switch (groupId)
             {
-                case "13549943": // 憲兵
-                    maxRank = 239;
-                    break;
-                case "13662982": // 裝甲
-                    maxRank = 120;
-                    break;
-                case "16223475": // 航特
-                    maxRank = 55;
-                    break;
+                case "13549943": maxRank = 239; break;
+                case "13662982": maxRank = 120; break;
+                case "16223475": maxRank = 55; break;
             }
-            int minRank = 1; // 最低 Rank 皆從 1 開始
+            int minRank = 1;
 
             string cursor = "";
             bool hasMore = true;
@@ -452,8 +501,6 @@ namespace ROCAPointBot
 
             var existingUsers = await db.UserPoints.Where(u => u.GuildId == guildId).Select(u => u.RobloxUsername.ToLower()).ToListAsync();
             var existingSet = new HashSet<string>(existingUsers);
-
-            // 建立一個清單，用來記錄這一次從 Roblox API 抓到的「所有符合設定權重的有效玩家」
             var validActiveUsers = new HashSet<string>();
 
             while (hasMore)
@@ -465,7 +512,7 @@ namespace ROCAPointBot
                 if (!res.IsSuccessStatusCode)
                 {
                     Console.WriteLine("⚠️ Roblox API 請求失敗或已達限制，中斷同步以保護資料庫。");
-                    return addedCount; // 遇到錯誤直接退出，避免誤刪資料
+                    return (addedCount, removedCount); // 💡 修改為回傳兩個值
                 }
 
                 var json = await res.Content.ReadAsStringAsync();
@@ -478,7 +525,6 @@ namespace ROCAPointBot
                     string username = item.GetProperty("user").GetProperty("username").GetString();
                     int rank = item.GetProperty("role").GetProperty("rank").GetInt32();
 
-                    // 💡 使用迴圈外判斷出的 maxRank 與 minRank 進行篩選
                     if (rank <= maxRank && rank >= minRank)
                     {
                         validActiveUsers.Add(username.ToLower());
@@ -498,9 +544,6 @@ namespace ROCAPointBot
                     hasMore = false;
             }
 
-            // 🧹 【自動清理動作】
-            // 檢查目前資料庫裡的人，如果他不包含在剛剛抓到的「有效名單」內
-            // (代表他可能升官超過設定的 rank，或者是已經退群了)，就從資料庫中刪除他
             var usersToDelete = await db.UserPoints.Where(u => u.GuildId == guildId).ToListAsync();
             var finalDeleteList = usersToDelete.Where(u => !validActiveUsers.Contains(u.RobloxUsername.ToLower())).ToList();
 
@@ -512,7 +555,8 @@ namespace ROCAPointBot
             }
 
             if (addedCount > 0 || removedCount > 0) await db.SaveChangesAsync();
-            return addedCount;
+
+            return (addedCount, removedCount); // 💡 修改為回傳兩個值
         }
 
         private async Task<bool> VerifyUserInRobloxGroup(string username, string groupId)
