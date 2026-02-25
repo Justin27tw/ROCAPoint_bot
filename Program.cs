@@ -14,6 +14,10 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
+using Google.Apis.Auth.OAuth2;
+using Google.Apis.Services;
+using Google.Apis.Sheets.v4;
+using Google.Apis.Sheets.v4.Data;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace ROCAPointBot
@@ -74,7 +78,8 @@ namespace ROCAPointBot
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD MasterLogChannelId decimal(20,0) NULL"); } catch { }
                     // 2. 新增這行：強制將現有資料庫中錯誤的 BIGINT 欄位轉正為 decimal(20,0)
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ALTER COLUMN MasterLogChannelId decimal(20,0) NULL"); } catch { }
-
+                    // 自動嘗試在現有資料表中加入 GoogleSheetId 欄位
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD GoogleSheetId NVARCHAR(100) NULL"); } catch { }
                     // 👇 ================= 新增這段程式碼 ================= 👇
                     // 自動嘗試建立 AdminChannels 資料表 (如果它不存在的話)
                     try
@@ -127,6 +132,9 @@ namespace ROCAPointBot
                 .AddOption("admin_role_6", ApplicationCommandOptionType.Role, "管理身分組 6 (選填)", isRequired: false)
                 .AddOption("admin_role_7", ApplicationCommandOptionType.Role, "管理身分組 7 (選填)", isRequired: false)
                 .Build(),
+                new SlashCommandBuilder().WithName("bind-sheet")
+                .WithDescription("📊 獲取本單位專屬的 Google 試算表連結與同步選單")
+                .Build(),
                 new SlashCommandBuilder().WithName("sync-members").WithDescription("🔄 手動同步 Roblox 群組的最新成員至資料庫").Build(),
                 new SlashCommandBuilder().WithName("points").WithDescription("📊 查詢點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("addpoint").WithDescription("➕ 發放點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).AddOption("points", ApplicationCommandOptionType.Integer, "點數數量", isRequired: true).AddOption("reason", ApplicationCommandOptionType.String, "原因備註", isRequired: true).Build(),
@@ -161,6 +169,7 @@ namespace ROCAPointBot
                     .WithDescription("📝 設定本伺服器的專屬紀錄(Log)推播頻道")
                     .AddOption("channel", ApplicationCommandOptionType.Channel, "選擇要接收推播的文字頻道", isRequired: true)
                     .Build(),
+                
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -237,6 +246,8 @@ namespace ROCAPointBot
 
                             await command.FollowupAsync("⏳ 正在與 Roblox 同步群組成員名單...");
                             var syncResult = await SyncGroupMembersAsync(db, gid, botConfig.RobloxGroupId);
+                            // 在背景非同步執行試算表更新，不影響 Discord 機器人的回應速度
+                            _ = UpdateGoogleSheetAsync(gid);
                             await command.FollowupAsync($"✅ 同步完成！\n> 🟢 本次共新增了 **{syncResult.added}** 位新成員\n> 🔴 移除了 **{syncResult.removed}** 位已退群或不符資格成員。");
                             break;
                         }
@@ -355,6 +366,8 @@ namespace ROCAPointBot
                             var newLog = new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = pts, Reason = reason, Timestamp = Program.GetTaipeiTime() };
                             db.PointLogs.Add(newLog);
                             await db.SaveChangesAsync();
+                            // 在背景非同步執行試算表更新，不影響 Discord 機器人的回應速度
+                            _ = UpdateGoogleSheetAsync(gid);
 
                             // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
                             string addMsg = $"> **[點數發放]** 登記人：**{command.User.Username}**\n" +
@@ -406,6 +419,8 @@ namespace ROCAPointBot
                             var newLog = new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = -pts, Reason = reason, Timestamp = Program.GetTaipeiTime() };
                             db.PointLogs.Add(newLog);
                             await db.SaveChangesAsync();
+                            // 在背景非同步執行試算表更新，不影響 Discord 機器人的回應速度
+                            _ = UpdateGoogleSheetAsync(gid);
 
                             string removeMsg = $">  **[點數扣除/兌換]** 登記人：**{command.User.Username}**\n" +
                                                $">  **✅成功扣除 {pts} 點，自 {name}**\n" +
@@ -495,7 +510,8 @@ namespace ROCAPointBot
                             targetLog.Reason += $" (已由 {command.User.Username} 撤銷，原因：{delReason})";
 
                             await db.SaveChangesAsync();
-
+                            // 在背景非同步執行試算表更新，不影響 Discord 機器人的回應速度
+                            _ = UpdateGoogleSheetAsync(gid);
                             // 顯示在前端頻道給大家看的訊息
                             string delMsg = $" **[紀錄撤銷]** 負責人：**{command.User.Username}**\n" +
                                             $"> 成功撤銷了紀錄 #{logId}\n" +
@@ -603,7 +619,58 @@ namespace ROCAPointBot
                             await command.FollowupAsync($"✅ **已將此頻道設為國防部推播頻道！**\n📡 授權監控的單位編號：`{codes}`\n👮 授權查詢身分組：<@&{mndRole.Id}>\n> *(擁有該身分組的長官，現在可以在此頻道使用 `/admin-view` 指令查詢各單位排行榜了！)*");
                             break;
                         }
+                    case "bind-sheet":
+                        {
+                            if (botConfig == null || string.IsNullOrEmpty(botConfig.RobloxGroupId))
+                            {
+                                await command.FollowupAsync("❌ 請先使用 `/setup-roca` 完成基本設定。");
+                                break;
+                            }
 
+                            // 判斷該伺服器所屬單位
+                            string sheetId = "";
+                            string unitName = "";
+                            string combinedSheetId = "1v8TmW04kJwUKPFeghK5OkNzyj65XSrcHXHWGfsokTQ8";
+
+                            switch (botConfig.RobloxGroupId)
+                            {
+                                case "13549943":
+                                    unitName = "憲兵";
+                                    sheetId = "1cSaJJXq75MJ479RV5KcZ8oYBHxdbexC5f0XQtzd7Bwo";
+                                    break;
+                                case "13662982":
+                                    unitName = "裝甲";
+                                    sheetId = "1k08y_tUTA0_eS_W9zkGQzHU3OSLHcVlzKtTXvjzUxB4";
+                                    break;
+                                case "16223475":
+                                    unitName = "航特";
+                                    sheetId = "1rOXjrRdBD1S77guAByBaACgxToReHMUhSiU2WE1_zrE";
+                                    break;
+                                default:
+                                    sheetId = botConfig.GoogleSheetId;
+                                    unitName = "自訂單位";
+                                    break;
+                            }
+
+                            if (string.IsNullOrEmpty(sheetId))
+                            {
+                                await command.FollowupAsync("❌ 目前無法辨識您的單位，或者此伺服器尚未綁定自訂試算表。");
+                                break;
+                            }
+
+                            // 建立前往試算表的網址
+                            string sheetUrl = $"https://docs.google.com/spreadsheets/d/{sheetId}/edit";
+                            string combinedUrl = $"https://docs.google.com/spreadsheets/d/{combinedSheetId}/edit";
+
+                            // 建立按鈕介面 (Link Button 點擊會直接開啟瀏覽器)
+                            var buttons = new ComponentBuilder()
+                                .WithButton($"🔗 開啟 {unitName} 專屬試算表", style: ButtonStyle.Link, url: sheetUrl)
+                                .WithButton("🔗 開啟 三單位總覽試算表", style: ButtonStyle.Link, url: combinedUrl)
+                                .WithButton("🔄 強制同步最新資料至試算表", $"force_sync_sheet_{gid}", ButtonStyle.Success);
+
+                            await command.FollowupAsync($"✅ **系統已自動對應您的單位為：【{unitName}】**\n> 點擊下方按鈕即可快速前往您的資料庫，或手動執行資料同步：", components: buttons.Build());
+                            break;
+                        }
                     case "admin-view":
                         {
                             var ac = await db.AdminChannels.FindAsync(command.Channel.Id);
@@ -752,6 +819,25 @@ namespace ROCAPointBot
                     {
                         await component.RespondAsync("❌ 發生內部錯誤，無法辨識第一位管理員的身分。", ephemeral: true);
                     }
+                }
+                // 處理強制同步試算表的按鈕
+                if (id.StartsWith("force_sync_sheet_"))
+                {
+                    if (!isAdmin)
+                    {
+                        await component.RespondAsync("❌ 權限不足，僅限管理員執行。", ephemeral: true);
+                        return;
+                    }
+
+                    // 告訴使用者正在處理中 (ephemeral 代表只有點擊的人看得到)
+                    await component.RespondAsync("⏳ 正在將最新資料上傳至 Google 試算表，請稍候...", ephemeral: true);
+
+                    // 執行同步
+                    await UpdateGoogleSheetAsync(gid);
+
+                    // 更新狀態
+                    await component.FollowupAsync("✅ **同步完成！** 您現在可以點擊上方的連結前往查看最新數據。", ephemeral: true);
+                    return;
                 }
             }
         }
@@ -924,6 +1010,108 @@ namespace ROCAPointBot
                 }
             }
         }
+        private async Task UpdateGoogleSheetAsync(ulong guildId)
+        {
+            try
+            {
+                using var db = new BotDbContext(_configuration);
+                var config = await db.Configs.FindAsync(guildId);
+
+                // 如果沒有設定群組ID，則無法判斷單位，直接中斷
+                if (config == null || string.IsNullOrEmpty(config.RobloxGroupId)) return;
+
+                string individualSheetId = "";
+                string tabName = "";
+                // 這是你提供的「三單位總覽試算表 ID」
+                string combinedSheetId = "1v8TmW04kJwUKPFeghK5OkNzyj65XSrcHXHWGfsokTQ8";
+
+                // 根據綁定的 Roblox 群組 ID，自動對應專屬試算表與分頁名稱
+                switch (config.RobloxGroupId)
+                {
+                    case "13549943": // 憲兵
+                        individualSheetId = "1cSaJJXq75MJ479RV5KcZ8oYBHxdbexC5f0XQtzd7Bwo";
+                        tabName = "憲兵";
+                        break;
+                    case "13662982": // 裝甲
+                        individualSheetId = "1k08y_tUTA0_eS_W9zkGQzHU3OSLHcVlzKtTXvjzUxB4";
+                        tabName = "裝甲";
+                        break;
+                    case "16223475": // 航特
+                        individualSheetId = "1rOXjrRdBD1S77guAByBaACgxToReHMUhSiU2WE1_zrE";
+                        tabName = "航特";
+                        break;
+                    default:
+                        // 若未來有其他單位，且有使用 /bind-sheet 綁定自訂 ID 時的備用方案
+                        if (!string.IsNullOrEmpty(config.GoogleSheetId))
+                        {
+                            individualSheetId = config.GoogleSheetId;
+                            tabName = ""; // 無對應總覽分頁
+                        }
+                        else return;
+                        break;
+                }
+
+                // 從資料庫抓取最新的排行榜資料
+                var users = await db.UserPoints.Where(u => u.GuildId == guildId).OrderByDescending(u => u.Points).ToListAsync();
+
+                // 準備要寫入 Google 試算表的資料結構 (3個欄位)
+                var valueRange = new ValueRange();
+                var oblist = new List<IList<object>>()
+        {
+            new List<object>() { "人員名稱", "目前點數", "最後變動時間" } // 自訂表頭
+        };
+
+                string updateTime = Program.GetTaipeiTime().ToString("yyyy-MM-dd HH:mm:ss");
+                foreach (var u in users)
+                {
+                    // 寫入三欄資料：名稱、點數、時間
+                    oblist.Add(new List<object>() { u.RobloxUsername, u.Points, updateTime });
+                }
+                valueRange.Values = oblist;
+
+                // 讀取 Google 服務帳戶金鑰
+                GoogleCredential credential;
+                using (var stream = new System.IO.FileStream("google-credentials.json", System.IO.FileMode.Open, System.IO.FileAccess.Read))
+                {
+                    credential = GoogleCredential.FromStream(stream).CreateScoped(SheetsService.Scope.Spreadsheets);
+                }
+
+                var service = new SheetsService(new BaseClientService.Initializer()
+                {
+                    HttpClientInitializer = credential,
+                    ApplicationName = "ROCA Point Bot"
+                });
+
+                // 🟢 動作 1：更新該單位的「專屬試算表」
+                if (!string.IsNullOrEmpty(individualSheetId))
+                {
+                    // 先清空 A 到 C 欄
+                    await service.Spreadsheets.Values.Clear(new ClearValuesRequest(), individualSheetId, "A:C").ExecuteAsync();
+                    // 寫入新資料
+                    var updateRequest = service.Spreadsheets.Values.Update(valueRange, individualSheetId, "A1");
+                    updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+                    await updateRequest.ExecuteAsync();
+                }
+
+                // 🟢 動作 2：同步更新「三單位總覽試算表」的對應分頁
+                if (!string.IsNullOrEmpty(tabName))
+                {
+                    // 指定範圍加上分頁名稱，例如 "裝甲!A:C"
+                    string range = $"{tabName}!A:C";
+                    await service.Spreadsheets.Values.Clear(new ClearValuesRequest(), combinedSheetId, range).ExecuteAsync();
+
+                    var updateCombinedReq = service.Spreadsheets.Values.Update(valueRange, combinedSheetId, $"{tabName}!A1");
+                    updateCombinedReq.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+                    await updateCombinedReq.ExecuteAsync();
+                }
+
+                Console.WriteLine($"✅ 伺服器 {guildId} (單位:{tabName}) 的專屬試算表與總覽試算表同步成功！");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Google Sheet 同步失敗: {ex.Message}");
+            }
+        }
     }
 
     public class BotDbContext : DbContext
@@ -934,7 +1122,8 @@ namespace ROCAPointBot
         public DbSet<UserPoint> UserPoints { get; set; }
         public DbSet<PointLog> PointLogs { get; set; }
         public DbSet<BotConfig> Configs { get; set; }
-  public DbSet<AdminChannelConfig> AdminChannels { get; set; }
+        public DbSet<AdminChannelConfig> AdminChannels { get; set; }
+     
         protected override void OnConfiguring(DbContextOptionsBuilder options)
         {
             string conn = _config["DbConnection"];
@@ -963,6 +1152,8 @@ namespace ROCAPointBot
         public ulong? MasterLogChannelId { get; set; }
         // 👇 新增這個欄位：用來儲存多個身分組 ID (以逗號分隔)
         public string? AdminRoleIds { get; set; }
+        // 👇 新增這個欄位：用來儲存各單位的獨立 Google Sheet ID
+        public string? GoogleSheetId { get; set; }
     }
     // 👇 新增這個類別：記錄哪個頻道負責監聽哪些伺服器編號
     public class AdminChannelConfig
