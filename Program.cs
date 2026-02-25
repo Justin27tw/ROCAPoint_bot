@@ -120,7 +120,11 @@ namespace ROCAPointBot
                 new SlashCommandBuilder().WithName("addpoint").WithDescription("➕ 發放點數").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).AddOption("points", ApplicationCommandOptionType.Integer, "點數數量", isRequired: true).AddOption("reason", ApplicationCommandOptionType.String, "原因備註", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("history").WithDescription("📜 查詢玩家近期紀錄").AddOption("user", ApplicationCommandOptionType.User, "選擇玩家", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("viewall").WithDescription("🏆 點數總排行榜 (顯示所有成員)").Build(),
-                new SlashCommandBuilder().WithName("del-record").WithDescription("🚨 刪除單筆紀錄").AddOption("id", ApplicationCommandOptionType.Integer, "紀錄 ID", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("del-record")
+                    .WithDescription("🚨 刪除單筆紀錄")
+                    .AddOption("id", ApplicationCommandOptionType.Integer, "紀錄 ID", isRequired: true)
+                    .AddOption("reason", ApplicationCommandOptionType.String, "撤銷原因", isRequired: true) // 👈 新增這行原因必填
+                    .Build(),
                 new SlashCommandBuilder().WithName("unbind-roca").WithDescription("🔓 解除綁定設定").Build(),
                 new SlashCommandBuilder().WithName("clear-all-data").WithDescription("🔥 【極度危險】刪除本伺服器所有資料").Build(),
                 new SlashCommandBuilder().WithName("daily-records").WithDescription("📅 查詢指定日期的所有點數紀錄").AddOption("date", ApplicationCommandOptionType.String, "格式: YYYY-MM-DD", isRequired: true).Build(),
@@ -130,6 +134,12 @@ namespace ROCAPointBot
                 new SlashCommandBuilder().WithName("admin-setup").WithDescription("🔒 國防部專用：將此頻道設為 Admin 頻道以監控其他單位").AddOption("server_codes", ApplicationCommandOptionType.String, "要監控的伺服器編號(多個用逗號分隔，如 A1B2,C3D4)", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("admin-view").WithDescription("👁️ 國防部專用：查看特定單位的總排行榜").AddOption("server_code", ApplicationCommandOptionType.String, "目標伺服器編號", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("my-code").WithDescription("🔑 查詢本伺服器的專屬資料庫編號 (交給國防部綁定通知用)").Build(),
+                new SlashCommandBuilder().WithName("removepoint")
+                    .WithDescription("➖ 扣除或兌換點數")
+                    .AddOption("user", ApplicationCommandOptionType.User, "選擇人員", isRequired: true)
+                    .AddOption("points", ApplicationCommandOptionType.Integer, "扣除數量", isRequired: true)
+                    .AddOption("reason", ApplicationCommandOptionType.String, "原因備註", isRequired: true)
+                    .Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -282,8 +292,8 @@ namespace ROCAPointBot
                             await db.SaveChangesAsync();
 
                             // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
-                            string addMsg = $">  [點數發放] 負責人：**{command.User.Username}**\n" +
-                                            $">  成功發放 **{pts}** 點給 **{name}**\n" +
+                            string addMsg = $">  **[點數發放]**登記人：**{command.User.Username}**\n" +
+                                            $">  ✅發放 **{pts}** 點給 **{name}**\n" +
                                             $">  目前總計：**{rec.Points}** 點\n" +
                                             $">  備註：{reason} \n" +
                                             $">  紀錄編號：{newLog.Id}";  // 這裡也修正為 {newLog.Id}
@@ -296,7 +306,56 @@ namespace ROCAPointBot
                                         $">  紀錄編號：**{newLog.Id}** (若需撤銷請使用 /del-record)");
                             break;
                         }
+                    case "removepoint":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
+                            var exec = (SocketGuildUser)command.User;
+                            if (!exec.Roles.Any(r => r.Id == botConfig.AdminRoleId) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
 
+                            var user = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
+                            int pts = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
+                            string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
+
+                            if (pts <= 0) { await command.FollowupAsync("❌ 扣除的點數必須大於 0。"); break; }
+
+                            string name = user.Nickname ?? user.Username;
+                            if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
+
+                            if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { await command.FollowupAsync($"❌ 玩家 `{name}` 不在指定的 Roblox 群組內，或名稱不相符。"); break; }
+
+                            var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
+
+                            // 檢查玩家有沒有足夠的點數可以扣
+                            if (rec == null || rec.Points < pts)
+                            {
+                                int currentPts = rec == null ? 0 : rec.Points;
+                                await command.FollowupAsync($"❌ **{name}** 的點數不足！目前僅有 **{currentPts}** 點，無法扣除 **{pts}** 點。");
+                                break;
+                            }
+
+                            // 執行扣點
+                            rec.Points -= pts;
+
+                            // 紀錄寫入資料庫，注意這裡的 PointsAdded 存為 -pts (負數)
+                            var newLog = new PointLog { GuildId = gid, RobloxUsername = name, AdminName = command.User.Username, PointsAdded = -pts, Reason = reason, Timestamp = Program.GetTaipeiTime() };
+                            db.PointLogs.Add(newLog);
+                            await db.SaveChangesAsync();
+
+                            string removeMsg = $">  **[點數扣除/兌換]** 登記人：**{command.User.Username}**\n" +
+                                               $">  ✅成功扣除 **{pts}** 點自 **{name}**\n" +
+                                               $">  目前剩餘：**{rec.Points}** 點\n" +
+                                               $">  備註：{reason} \n" +
+                                               $">  紀錄編號：{newLog.Id}";
+                            await command.FollowupAsync(removeMsg);
+
+                            // 推播給總部
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 已扣除點數\n" +
+                                        $">  被登記人：**{name}** 扣除 **{pts}** 點\n" +
+                                        $">  目前剩餘：**{rec.Points}** 點\n" +
+                                        $">  備註：{reason}\n" +
+                                        $">  紀錄編號：**{newLog.Id}**");
+                            break;
+                        }
                     case "status":
                         {
                             int latency = _client.Latency;
@@ -325,11 +384,13 @@ namespace ROCAPointBot
                             {
                                 string idRaw = $"[ID: {l.Id}]".PadRight(9);
                                 string timeStr = l.Timestamp.ToString("MM/dd HH:mm");
-                                string ptsRaw = $"+{l.PointsAdded}".PadLeft(5);
+                                // 自動判斷正負號
+                                string ptsRaw = (l.PointsAdded > 0 ? $"+{l.PointsAdded}" : l.PointsAdded.ToString()).PadLeft(5);
                                 string adminStr = l.AdminName.PadRight(12);
 
                                 string idStr = $"\u001b[34m{idRaw}\u001b[0m";
-                                string ptsStr = $"\u001b[32m{ptsRaw}\u001b[0m";
+                                // 正數維持綠色(32m)，負數改為紅色(31m)
+                                string ptsStr = (l.PointsAdded > 0 ? "\u001b[32m" : "\u001b[31m") + $"{ptsRaw}\u001b[0m";
 
                                 sb.AppendLine($"{idStr} \u001b[30m{timeStr}\u001b[0m | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
                             }
@@ -343,7 +404,10 @@ namespace ROCAPointBot
                             if (botConfig == null) { await command.FollowupAsync("⚠️ 請先設定。"); return; }
                             if (!((SocketGuildUser)command.User).Roles.Any(r => r.Id == botConfig.AdminRoleId)) { await command.FollowupAsync("❌ 權限不足。"); return; }
 
-                            int logId = Convert.ToInt32((long)command.Data.Options.First().Value);
+                            // 接收 ID 與必填的原因
+                            int logId = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "id").Value);
+                            string delReason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
+
                             var targetLog = await db.PointLogs.FirstOrDefaultAsync(l => l.Id == logId && l.GuildId == gid);
 
                             if (targetLog == null || targetLog.IsDeleted) { await command.FollowupAsync("❌ 找不到該紀錄或已經被撤銷過了。"); break; }
@@ -359,18 +423,23 @@ namespace ROCAPointBot
                             }
 
                             targetLog.IsDeleted = true;
-                            targetLog.Reason += $" (已由 {command.User.Username} 撤銷)";
+                            // 將撤銷原因加到資料庫原有的 Reason 後面，方便未來追蹤
+                            targetLog.Reason += $" (已由 {command.User.Username} 撤銷，原因：{delReason})";
 
                             await db.SaveChangesAsync();
 
+                            // 顯示在前端頻道給大家看的訊息
                             string delMsg = $" **[紀錄撤銷]** 負責人：**{command.User.Username}**\n" +
                                             $"> 成功撤銷了紀錄 #{logId}\n" +
-                                            $">  被扣點人：{targetLog.RobloxUsername}\n" +
-                                            $">  已扣除：{targetLog.PointsAdded} 點\n" +
+                                            $">  **被扣點人：{targetLog.RobloxUsername}**\n" +
+                                            $">  **已扣除：{targetLog.PointsAdded} 點**\n" +
+                                            $">  **扣除原因：{delReason}**\n" +
                                             $">  **目前剩餘：{currentPoints} 點**";
 
                             await command.FollowupAsync(delMsg);
-                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣除 {targetLog.PointsAdded} 點。\n>  人員：{targetLog.RobloxUsername}\n>  剩餘：{currentPoints}點");
+
+                            // 同步推播給總部的訊息也加上原因
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，扣除 {targetLog.PointsAdded} 點。\n>  人員：{targetLog.RobloxUsername}\n>  扣除原因：{delReason}\n>  剩餘：{currentPoints}點");
                             break;
                         }
 
@@ -381,13 +450,14 @@ namespace ROCAPointBot
                             var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
                             if (!dLogs.Any()) { await command.FollowupAsync("📭 該日無紀錄。"); break; }
 
-                            var dSb = new StringBuilder($"#  {dt:yyyy-MM-dd} 發放紀錄清單\n```text\n");
+                            var dSb = new StringBuilder($"#  {dt:yyyy-MM-dd} 點數紀錄清單\n```text\n");
                             foreach (var l in dLogs)
                             {
                                 string idStr = $"[ID: {l.Id}]".PadRight(9);
                                 string timeStr = l.Timestamp.ToString("HH:mm");
                                 string nameStr = l.RobloxUsername.PadRight(18);
-                                string ptsStr = $"+{l.PointsAdded}".PadLeft(5);
+                                // 自動判斷正負號
+                                string ptsStr = (l.PointsAdded > 0 ? $"+{l.PointsAdded}" : l.PointsAdded.ToString()).PadLeft(5);
                                 string adminStr = l.AdminName.PadRight(12);
 
                                 dSb.AppendLine($"{idStr} {timeStr} | {nameStr} ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
