@@ -346,10 +346,10 @@ namespace ROCAPointBot
 
                             // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
                             string addMsg = $">  **[點數發放]**登記人：**{command.User.Username}**\n" +
-                                            $">  **✅發放{pts}點給{name}**\n" +
+                                            $">  **✅發放{pts}點，給{name}**\n" +
                                             $">  **目前總計：**{rec.Points} 點**\n" +
                                             $">  **備註：{reason}** \n" +
-                                            $">  **紀錄編號：{newLog.Id}**";  // 這裡也修正為 {newLog.Id}
+                                            $">  **紀錄編號**：{newLog.Id}";  // 這裡也修正為 {newLog.Id}
                             await command.FollowupAsync(addMsg);
 
                             bool isAnomaly = pts >= 100; // 判斷是否大於等於 100
@@ -396,10 +396,10 @@ namespace ROCAPointBot
                             await db.SaveChangesAsync();
 
                             string removeMsg = $">  **[點數扣除/兌換]** 登記人：**{command.User.Username}**\n" +
-                                               $">  **✅成功扣除 {pts} 點自 {name}**\n" +
+                                               $">  **✅成功扣除 {pts} 點，自 {name}**\n" +
                                                $">  **目前剩餘**：**{rec.Points}** 點\n" +
                                                $">  **備註：{reason}** \n" +
-                                               $">  **紀錄編號：{newLog.Id}**";
+                                               $">  **紀錄編號**：{newLog.Id}";
                             await command.FollowupAsync(removeMsg);
 
                             // 推播給總部
