@@ -47,6 +47,8 @@ namespace ROCAPointBot
         private static readonly HttpClient _http = new HttpClient();
         private readonly string _discordToken;
         private readonly IConfiguration _configuration;
+        // 👇 新增這行：用來暫存尚未通過雙人確認的 MENU 內容
+        private static readonly Dictionary<ulong, string> PendingMenus = new Dictionary<ulong, string>();
 
         // 👇 新增：你的開發者 ID 與私訊頻道 ID
         private readonly ulong _developerId = 1018018187318673471;
@@ -90,7 +92,7 @@ namespace ROCAPointBot
             };
             _client.SlashCommandExecuted += HandleSlashCommandAsync;
             _client.InteractionCreated += HandleInteractionAsync;
-
+            _client.ModalSubmitted += HandleModalAsync; // 👈 新增這行
             await _client.LoginAsync(TokenType.Bot, _discordToken);
             await _client.StartAsync();
             // 👇 2. 新增這段：防休眠自動呼叫 (Keep-Alive) 機制
@@ -132,6 +134,11 @@ namespace ROCAPointBot
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD GoogleSheetId NVARCHAR(100) NULL"); } catch { }
                     // 👇 新增這行：自動替現有的 AdminChannels 加上第二個身分組欄位
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE AdminChannels ADD MndAdminRoleId2 decimal(20,0) NULL"); } catch { }
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD RewardMenuContent NVARCHAR(MAX) NULL"); } catch { }
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD RewardMenuUpdateTime datetime2 NULL"); } catch { }
+                    // 為了相容 SQLite 的備用語法
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD RewardMenuContent TEXT NULL"); } catch { }
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD RewardMenuUpdateTime DATETIME NULL"); } catch { }
                     // 👇 ================= 新增這段程式碼 ================= 👇
                     // 自動嘗試建立 AdminChannels 資料表 (如果它不存在的話)
                     try
@@ -234,7 +241,9 @@ namespace ROCAPointBot
                     .WithDescription("📝 設定本伺服器的專屬紀錄(Log)推播頻道")
                     .AddOption("channel", ApplicationCommandOptionType.Channel, "選擇要接收推播的文字頻道", isRequired: true)
                     .Build(),
-                
+                new SlashCommandBuilder().WithName("edit-menu").WithDescription("🛍️ 編輯兌換點數 MENU (雙人確認後發布)").Build(),
+                new SlashCommandBuilder().WithName("menu").WithDescription("📜 查看目前的兌換點數 MENU (僅自己可見)").Build(),
+                new SlashCommandBuilder().WithName("view-admins").WithDescription("👮 查看目前擁有權限的管理員身分組名單").Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -246,8 +255,14 @@ namespace ROCAPointBot
 
             try
             {
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel";
-                await command.DeferAsync(ephemeral: isEphemeral);
+                // 1. 將 isEphemeral 增加後面這幾個指令
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins";
+
+                // 2. 只有「不是 edit-menu」的時候才能 DeferAsync
+                if (command.Data.Name != "edit-menu")
+                {
+                    await command.DeferAsync(ephemeral: isEphemeral);
+                }
 
                 using var db = new BotDbContext(_configuration);
                 if (!await db.Database.CanConnectAsync())
@@ -731,6 +746,53 @@ namespace ROCAPointBot
                             await command.FollowupAsync($"✅ **已將此頻道設為國防部推播頻道！**\n📡 授權監控的單位編號：`{codes}`\n👮 授權查詢身分組：<@&{mndRole.Id}>\n> *(擁有該身分組的長官，現在可以在此頻道使用 `/admin-view` 指令查詢各單位排行榜了！)*");
                             break;
                         }
+                    case "edit-menu":
+                        {
+                            if (botConfig == null) { await command.RespondAsync("❌ 請先設定機器人。", ephemeral: true); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.RespondAsync("❌ 限管理員執行。", ephemeral: true); return; }
+
+                            var mb = new ModalBuilder()
+                                .WithTitle("編輯兌換點數 MENU")
+                                .WithCustomId($"edit_menu_modal");
+
+                            // 將原本的 mb.AddTextInput 替換成這個：
+                            mb.AddTextInput("請輸入 MENU (品項-點數-備註，一行一個)", "menu_content", TextInputStyle.Paragraph,
+                             placeholder: "範例：\n-- 晉升階級 --\n升下士—— 10點\n升中士 - 40 - 需舉辦2招募、2訓練\n升上士—— 60(需專精合格)\n\n(系統會自動幫您精美排版與對齊！)",
+                             value: botConfig.RewardMenuContent ?? "", maxLength: 3000);
+
+                            // 跳出編輯視窗 (Modal)
+                            await command.RespondWithModalAsync(mb.Build());
+                            break;
+                        }
+
+                    case "menu":
+                        {
+                            if (botConfig == null || string.IsNullOrEmpty(botConfig.RewardMenuContent))
+                            {
+                                await command.FollowupAsync("📭 目前尚未設定任何 MENU，請管理員使用 `/edit-menu` 進行設定。");
+                                break;
+                            }
+
+                            string timeStr = botConfig.RewardMenuUpdateTime?.ToString("yyyy年MM月dd日HH:mm") ?? "未知時間";
+                            string formattedDisplayMenu = FormatMenuContent(botConfig.RewardMenuContent);
+                            string msg = $"### 🌟 點數兌換 MENU 總覽\n\n{formattedDisplayMenu}\n\n> *此為 {timeStr} 公告*";
+
+                            await command.FollowupAsync(msg);
+                            break;
+                        }
+
+                    case "view-admins":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 未設定。"); break; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 權限不足，僅限管理員查看。"); return; }
+
+                            var roles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList() ?? new List<string>();
+                            if (!roles.Any()) roles.Add(botConfig.AdminRoleId.ToString()); // 相容舊版資料
+
+                            var roleMentions = roles.Select(id => $"<@&{id}>");
+                            await command.FollowupAsync($"👮 **目前的管理員身分組名單：**\n{string.Join("\n", roleMentions)}");
+                            break;
+                        }
                     case "bind-sheet":
                         {
                             if (botConfig == null || string.IsNullOrEmpty(botConfig.RobloxGroupId))
@@ -1090,9 +1152,73 @@ namespace ROCAPointBot
                             m.Content = $"✅ **權限變更成功！** 已成功 **{actionText}** <@&{roleId}> 的管理員權限。\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}。";
                             m.Components = null;
                         });
+                        // 【將這行加進 editadm_s2_ 處理成功的最後面】
+                        _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【管理員權限變更】**\n> 動作：**{actionText}** <@&{roleId}>\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}", true);
                     }
                     return;
                 }
+                // ==================== MENU 變更 雙重確認邏輯 ====================
+                if (id.StartsWith("menucancel_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 只有管理員可以取消。", ephemeral: true); return; }
+                    PendingMenus.Remove(gid);
+                    await component.UpdateAsync(m => { m.Content = "❌ MENU 變更已由管理員取消。"; m.Components = null; });
+                    return;
+                }
+
+                if (id.StartsWith("menus1_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+                    var btn2 = new ComponentBuilder()
+                        .WithButton("🚨 第二位管理員最終確認", $"menus2_{gid}_{executor.Id}", ButtonStyle.Danger)
+                        .WithButton("取消", $"menucancel_{gid}", ButtonStyle.Secondary);
+
+                    await component.UpdateAsync(m => {
+                        m.Content = $"🚨 **【最終警告】** 即將發布新版 MENU！\n> 第一位管理員 {executor.Mention} 已確認。\n> 需要 **第二位不同的管理員** 按下確認才能發布！";
+                        m.Components = btn2.Build();
+                    });
+                    if (botConfig != null)
+                    {
+                        string adminRoleMention = $"<@&{botConfig.AdminRoleId}>";
+                        await component.Channel.SendMessageAsync($"🔔 {adminRoleMention} 警告：{executor.Mention} 正在申請發布新版 MENU，請另一位管理員進行最終確認！");
+                    }
+                    return;
+                }
+
+                if (id.StartsWith("menus2_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+                    var parts = id.Split('_');
+                    ulong firstAdminId = ulong.Parse(parts[2]);
+
+                    if (executor.Id == firstAdminId)
+                    {
+                        await component.RespondAsync("❌ 您已經確認過了！必須由另一位管理員確認。", ephemeral: true); return;
+                    }
+
+                    if (!PendingMenus.TryGetValue(gid, out string finalMenu))
+                    {
+                        await component.RespondAsync("❌ 讀取暫存的 MENU 失敗，請重新操作。", ephemeral: true); return;
+                    }
+
+                    botConfig.RewardMenuContent = finalMenu;
+                    botConfig.RewardMenuUpdateTime = Program.GetTaipeiTime();
+                    await db.SaveChangesAsync();
+                    PendingMenus.Remove(gid);
+
+                    string timeStr = botConfig.RewardMenuUpdateTime.Value.ToString("yyyy年MM月dd日HH:mm");
+                    string formattedFinalMenu = FormatMenuContent(finalMenu); // 套用排版
+
+                    await component.UpdateAsync(m => {
+                        m.Content = $"✅ **MENU 已成功發布！**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}\n\n{formattedFinalMenu}\n\n> *此為 {timeStr} 公告*";
+                        m.Components = null;
+                    });
+
+                    // 推播到本地 Log 頻道
+                    _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【MENU 更新公告】**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}\n> 新版 MENU 已生效，請大家可使用 `/menu` 查看最新品項。", true);
+                    return;
+                }
+                // ================================================================
                 // =======================================================================
                 // 處理強制同步試算表的按鈕
                 if (id.StartsWith("force_sync_sheet_"))
@@ -1115,7 +1241,28 @@ namespace ROCAPointBot
                 }
             }
         }
+        private async Task HandleModalAsync(SocketModal modal)
+        {
+            if (modal.Data.CustomId == "edit_menu_modal")
+            {
+                ulong gid = modal.GuildId ?? 0;
+                var executor = (SocketGuildUser)modal.User;
 
+                using var db = new BotDbContext(_configuration);
+                var botConfig = await db.Configs.FindAsync(gid);
+                if (botConfig == null || !IsAdmin(executor, botConfig)) { await modal.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+
+                string newContent = modal.Data.Components.First(x => x.CustomId == "menu_content").Value;
+                PendingMenus[gid] = newContent; // 將輸入的文字暫存起來
+
+                var btns = new ComponentBuilder()
+                    .WithButton("⚠️ 第一位管理員確認", $"menus1_{gid}", ButtonStyle.Danger)
+                    .WithButton("取消", $"menucancel_{gid}", ButtonStyle.Secondary);
+                string formattedPreview = FormatMenuContent(newContent); // 套用排版
+
+                await modal.RespondAsync($"⚠️ **【MENU 變更請求】** 確定要更新 MENU 嗎？\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。\n\n**✨ 系統自動排版預覽：**\n{formattedPreview}", components: btns.Build());
+            }
+        }
         // 💡 回傳型態改為 (int added, int removed)
         private async Task<(int added, int removed)> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
         {
@@ -1213,6 +1360,87 @@ namespace ROCAPointBot
                 return groupJson.Contains($"\"id\":{groupId}");
             }
             catch { return false; }
+        }
+        // 自動將管理員的純文字轉換為精美排版的 MENU
+        // 自動將管理員的純文字轉換為精美排版與 ANSI 色塊的 MENU
+        private string FormatMenuContent(string rawInput)
+        {
+            var lines = rawInput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var sb = new StringBuilder();
+            sb.AppendLine("```ansi");
+
+            foreach (var line in lines)
+            {
+                // 將常見的分隔符號 (包含全形破折號 ——) 統一轉換為 '-'
+                string tempLine = line.Replace("——", "-").Replace("：", "-").Replace(":", "-").Replace("=", "-");
+
+                // 最多切成三塊：品名, 點數, 備註 (支援格式：品名 - 點數 - 備註)
+                var parts = tempLine.Split(new[] { '-' }, 3, StringSplitOptions.RemoveEmptyEntries);
+
+                if (parts.Length >= 2)
+                {
+                    string item = parts[0].Trim();
+                    string ptsRaw = parts[1].Trim();
+                    string note = parts.Length == 3 ? parts[2].Trim() : "";
+
+                    // 支援另一種格式：如果使用者寫 "40點(需舉辦2招募)"，自動把括號內容抓出來當備註
+                    if (string.IsNullOrEmpty(note))
+                    {
+                        int idx = ptsRaw.IndexOf('(');
+                        if (idx == -1) idx = ptsRaw.IndexOf('（'); // 支援全形括號
+
+                        if (idx != -1)
+                        {
+                            note = ptsRaw.Substring(idx).Trim('(', ')', '（', '）', ' ');
+                            ptsRaw = ptsRaw.Substring(0, idx).Trim();
+                        }
+                    }
+
+                    // 過濾多餘的 "點" 字，只留數字
+                    string pts = ptsRaw.Replace("點", "").Trim();
+
+                    // 進行對齊與 ANSI 色彩排版
+                    string itemText = $"[{item}]";
+                    string paddedItem = PadRightCustom(itemText, 18); // 固定品名欄寬度 18
+                    string itemStr = $"\u001b[34m{paddedItem}\u001b[0m"; // 藍色
+
+                    string paddedPts = pts.PadLeft(4);
+                    string ptsStr = $"\u001b[32m{paddedPts} 點\u001b[0m"; // 綠色
+
+                    string formattedLine = $"{itemStr} ➔ {ptsStr}";
+
+                    // 如果有備註，就加上灰色顯示
+                    if (!string.IsNullOrEmpty(note))
+                    {
+                        formattedLine += $" \u001b[30m| 條件/備註: {note}\u001b[0m";
+                    }
+
+                    sb.AppendLine(formattedLine);
+                }
+                else
+                {
+                    // 如果沒有破折號，當作「分類標題」以黃色顯示
+                    sb.AppendLine($"\u001b[33m{line.Trim()}\u001b[0m");
+                }
+            }
+            sb.AppendLine("```");
+            return sb.ToString();
+        }
+
+        // 計算字串在 Discord 顯示的真實寬度 (中文字算寬度 2)
+        private int GetDisplayWidth(string s)
+        {
+            int length = 0;
+            foreach (char c in s) length += c > 0xFF ? 2 : 1;
+            return length;
+        }
+
+        // 補齊空格，讓所有中英文都能完美對齊
+        private string PadRightCustom(string s, int totalWidth)
+        {
+            int currentWidth = GetDisplayWidth(s);
+            if (currentWidth >= totalWidth) return s;
+            return s + new string(' ', totalWidth - currentWidth);
         }
         // 統一驗證使用者是否具備管理員權限
         private bool IsAdmin(SocketGuildUser user, BotConfig config)
@@ -1428,6 +1656,9 @@ namespace ROCAPointBot
         public string? AdminRoleIds { get; set; }
         // 👇 新增這個欄位：用來儲存各單位的獨立 Google Sheet ID
         public string? GoogleSheetId { get; set; }
+        // 在 BotConfig 類別中加入這兩行：
+        public string? RewardMenuContent { get; set; }
+        public DateTime? RewardMenuUpdateTime { get; set; }
     }
     // 👇 新增這個類別：記錄哪個頻道負責監聽哪些伺服器編號
     public class AdminChannelConfig
