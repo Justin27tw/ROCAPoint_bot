@@ -48,23 +48,68 @@ namespace ROCAPointBot
         private readonly string _discordToken;
         private readonly IConfiguration _configuration;
 
+        // 👇 新增：你的開發者 ID 與私訊頻道 ID
+        private readonly ulong _developerId = 1018018187318673471;
+        private readonly ulong _devDmChannelId = 1476489806946242592;
+
         public DiscordBotService(IConfiguration config)
         {
             _configuration = config;
             _discordToken = config["DiscordToken"];
         }
 
+        // 👇 新增：傳送狀態私訊給開發者的功能
+        private async Task SendStatusToDeveloperAsync(string message)
+        {
+            try
+            {
+                // 優先嘗試傳送至指定的 DM 頻道
+                if (_client.GetChannel(_devDmChannelId) is IMessageChannel dmChannel)
+                {
+                    await dmChannel.SendMessageAsync(message);
+                }
+                else
+                {
+                    // 備用方案：直接透過 User ID 傳送
+                    var dev = await _client.GetUserAsync(_developerId);
+                    if (dev != null) await dev.SendMessageAsync(message);
+                }
+            }
+            catch { /* 若沒有權限或頻道錯誤則忽略，避免機器人崩潰 */ }
+        }
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.GuildMembers };
             _client = new DiscordSocketClient(config);
-            _client.Ready += RegisterCommandsAsync;
+            // 👇 1. 將這裡原本的 _client.Ready += RegisterCommandsAsync; 替換成這段：
+            _client.Ready += async () =>
+            {
+                await RegisterCommandsAsync();
+                // 機器人開機時，自動發送私訊給你
+                await SendStatusToDeveloperAsync($"🟢 **[系統通知]** ROCA Point Bot 已成功啟動或重新連線！\n> 時間：{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}");
+            };
             _client.SlashCommandExecuted += HandleSlashCommandAsync;
             _client.InteractionCreated += HandleInteractionAsync;
 
             await _client.LoginAsync(TokenType.Bot, _discordToken);
             await _client.StartAsync();
-
+            // 👇 2. 新增這段：防休眠自動呼叫 (Keep-Alive) 機制
+            _ = Task.Run(async () =>
+            {
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    // 每 5 分鐘執行一次
+                    await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                    try
+                    {
+                        // ⚠️ 非常重要：請將下方的網址替換成你部署網站的「真實網址」
+                        // 例如 "https://roca-bot.runasp.net/" 或 "https://roca.onrender.com/"
+                        string myWebsiteUrl = "http://roca-bot.runasp.net/";
+                        await _http.GetAsync(myWebsiteUrl);
+                    }
+                    catch { /* 忽略呼叫失敗 */ }
+                }
+            }, stoppingToken);
             _ = Task.Run(async () =>
             {
                 try
@@ -710,12 +755,15 @@ namespace ROCAPointBot
                             break;
                         }
                 }
+
             }
             catch (Exception ex)
             {
                 string realError = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
                 Console.WriteLine($"[指令錯誤] {realError}");
                 string errMsg = $"❌ 發生內部錯誤: `{realError}`\n請檢查資料庫狀態。";
+                // 👇 新增這行：發生例外錯誤時自動私訊回報給你
+                _ = SendStatusToDeveloperAsync($"🚨 **[錯誤回報]** 發生未預期的例外錯誤！\n> **觸發指令**：`{command.Data.Name}`\n> **錯誤內容**：`{realError}`\n> **時間**：{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}");
                 if (command.HasResponded) await command.FollowupAsync(errMsg, ephemeral: true);
                 else await command.RespondAsync(errMsg, ephemeral: true);
             }
