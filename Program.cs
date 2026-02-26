@@ -130,6 +130,8 @@ namespace ROCAPointBot
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ALTER COLUMN MasterLogChannelId decimal(20,0) NULL"); } catch { }
                     // 自動嘗試在現有資料表中加入 GoogleSheetId 欄位
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD GoogleSheetId NVARCHAR(100) NULL"); } catch { }
+                    // 👇 新增這行：自動替現有的 AdminChannels 加上第二個身分組欄位
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE AdminChannels ADD MndAdminRoleId2 decimal(20,0) NULL"); } catch { }
                     // 👇 ================= 新增這段程式碼 ================= 👇
                     // 自動嘗試建立 AdminChannels 資料表 (如果它不存在的話)
                     try
@@ -204,7 +206,9 @@ namespace ROCAPointBot
                  new SlashCommandBuilder().WithName("admin-setup")
                 .WithDescription("🔒 國防部專用：設定監控頻道與授權身分組")
                 .AddOption("server_codes", ApplicationCommandOptionType.String, "要監控的伺服器編號(多個用逗號分隔，如 A1B2,C3D4)", isRequired: true)
-                .AddOption("mnd_role", ApplicationCommandOptionType.Role, "設定可以使用 /admin-view 的長官身分組", isRequired: true)
+                .AddOption("mnd_role", ApplicationCommandOptionType.Role, "設定可以使用 /admin-view 的長官身分組 1", isRequired: true)
+                // 👇 新增這行選項
+                .AddOption("mnd_role_2", ApplicationCommandOptionType.Role, "設定可以使用 /admin-view 的長官身分組 2 (選填)", isRequired: false)
                 .Build(),
                 new SlashCommandBuilder().WithName("admin-view").WithDescription("👁️ 國防部專用：查看特定單位的總排行榜").AddOption("server_code", ApplicationCommandOptionType.String, "目標伺服器編號", isRequired: true).Build(),
                 new SlashCommandBuilder().WithName("my-code").WithDescription("🔑 查詢本伺服器的專屬資料庫編號 (交給國防部綁定通知用)").Build(),
@@ -652,19 +656,24 @@ namespace ROCAPointBot
 
                             string codes = ((string)command.Data.Options.First(x => x.Name == "server_codes").Value).ToUpper();
                             var mndRole = (SocketRole)command.Data.Options.First(x => x.Name == "mnd_role").Value;
-
+                            // 👇 新增這行：嘗試讀取第二個身分組
+                            var mndRole2 = (SocketRole)command.Data.Options.FirstOrDefault(x => x.Name == "mnd_role_2")?.Value;
                             var adminChannel = await db.AdminChannels.FindAsync(command.Channel.Id);
 
                             if (adminChannel == null)
                             {
-                                db.AdminChannels.Add(new AdminChannelConfig { ChannelId = command.Channel.Id, GuildId = gid, TargetServerCodes = codes, MndAdminRoleId = mndRole.Id });
+                                // 👇 修改這行：將 MndAdminRoleId2 也存進去
+                                db.AdminChannels.Add(new AdminChannelConfig { ChannelId = command.Channel.Id, GuildId = gid, TargetServerCodes = codes, MndAdminRoleId = mndRole.Id, MndAdminRoleId2 = mndRole2?.Id });
                             }
                             else
                             {
                                 adminChannel.TargetServerCodes = codes;
                                 adminChannel.MndAdminRoleId = mndRole.Id;
+                                adminChannel.MndAdminRoleId2 = mndRole2?.Id; // 👇 新增這行
                             }
-
+                            // 👇 新增判斷：為了讓成功訊息正確顯示有幾個身分組
+                            string roleMsg = $"<@&{mndRole.Id}>";
+                            if (mndRole2 != null) roleMsg += $" 及 <@&{mndRole2.Id}>";
                             await db.SaveChangesAsync();
                             await command.FollowupAsync($"✅ **已將此頻道設為國防部推播頻道！**\n📡 授權監控的單位編號：`{codes}`\n👮 授權查詢身分組：<@&{mndRole.Id}>\n> *(擁有該身分組的長官，現在可以在此頻道使用 `/admin-view` 指令查詢各單位排行榜了！)*");
                             break;
@@ -726,11 +735,14 @@ namespace ROCAPointBot
                             var ac = await db.AdminChannels.FindAsync(command.Channel.Id);
                             if (ac == null) { await command.FollowupAsync("❌ 此頻道尚未被設定為 Admin 監控頻道。"); return; }
 
-                            // 👇 驗證使用者是否為伺服器管理員，或擁有國防部長官身分組
                             var execUser = (SocketGuildUser)command.User;
-                            bool hasMndRole = ac.MndAdminRoleId.HasValue && execUser.Roles.Any(r => r.Id == ac.MndAdminRoleId.Value);
 
-                            if (!execUser.GuildPermissions.Administrator && !hasMndRole)
+                            // 👇 修改這裡：分別檢查兩種身分組
+                            bool hasMndRole1 = ac.MndAdminRoleId.HasValue && execUser.Roles.Any(r => r.Id == ac.MndAdminRoleId.Value);
+                            bool hasMndRole2 = ac.MndAdminRoleId2.HasValue && execUser.Roles.Any(r => r.Id == ac.MndAdminRoleId2.Value);
+
+                            // 👇 修改這行：只要有其中一種身分組，或是伺服器管理員，就放行
+                            if (!execUser.GuildPermissions.Administrator && !hasMndRole1 && !hasMndRole2)
                             {
                                 await command.FollowupAsync("❌ 權限不足！您沒有被授權使用總部查詢指令。");
                                 return;
@@ -1219,5 +1231,6 @@ namespace ROCAPointBot
 
         // 👇 新增這行：儲存國防部專屬查詢身分組 ID
         public ulong? MndAdminRoleId { get; set; }
+        public ulong? MndAdminRoleId2 { get; set; } // 👈 新增這行：儲存第二個長官身分組
     }
 }
