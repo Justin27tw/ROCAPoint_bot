@@ -98,16 +98,21 @@ namespace ROCAPointBot
             {
                 while (!stoppingToken.IsCancellationRequested)
                 {
-                    // 每 5 分鐘執行一次
-                    await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
                     try
                     {
                         // ⚠️ 非常重要：請將下方的網址替換成你部署網站的「真實網址」
-                        // 例如 "https://roca-bot.runasp.net/" 或 "https://roca.onrender.com/"
                         string myWebsiteUrl = "http://roca-bot.runasp.net/";
                         await _http.GetAsync(myWebsiteUrl);
+                        Console.WriteLine($"🟢 [Keep-Alive] 成功 Ping 網站防止休眠 ({Program.GetTaipeiTime():HH:mm:ss})");
                     }
-                    catch { /* 忽略呼叫失敗 */ }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"⚠️ [Keep-Alive] 呼叫失敗: {ex.Message}");
+                    }
+
+                    // 將間隔縮短為 2 分鐘 (原本是 5 分鐘太久了)
+                    // 且將 Delay 移到請求之後，確保開機立刻執行一次
+                    await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
                 }
             }, stoppingToken);
             _ = Task.Run(async () =>
