@@ -47,8 +47,9 @@ namespace ROCAPointBot
         private static readonly HttpClient _http = new HttpClient();
         private readonly string _discordToken;
         private readonly IConfiguration _configuration;
-        
 
+        // 👇 新增這個變數：用來記錄機器人是否已經完成初次開機
+        private bool _isReady = false;
         // 👇 新增：你的開發者 ID 與私訊頻道 ID
         private readonly ulong _developerId = 1018018187318673471;
         private readonly ulong _devDmChannelId = 1476489806946242592;
@@ -82,12 +83,21 @@ namespace ROCAPointBot
         {
             var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.GuildMembers };
             _client = new DiscordSocketClient(config);
-            // 👇 1. 將這裡原本的 _client.Ready += RegisterCommandsAsync; 替換成這段：
+            // 👇 1. 將這裡原本的 _client.Ready 替換成這段：
             _client.Ready += async () =>
             {
+                if (_isReady)
+                {
+                    // 如果已經開機過，代表這是網路波動導致的「重新連線」，我們就記錄在 Console 即可，不要重複執行
+                    Console.WriteLine($"🔄 [系統通知] 機器人剛剛重新連線了 ({Program.GetTaipeiTime():HH:mm:ss})");
+                    return;
+                }
+
+                _isReady = true; // 標記為已成功開機
+
                 await RegisterCommandsAsync();
                 // 機器人開機時，自動發送私訊給你
-                await SendStatusToDeveloperAsync($"🟢 **[系統通知]** ROCA Point Bot 已成功啟動或重新連線！\n> 時間：{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}");
+                await SendStatusToDeveloperAsync($"🟢 **[系統通知]** ROCA Point Bot 已成功啟動！\n> 時間：{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}");
             };
             _client.SlashCommandExecuted += HandleSlashCommandAsync;
             _client.InteractionCreated += HandleInteractionAsync;
@@ -282,8 +292,8 @@ new SlashCommandBuilder().WithName("edit-menu")
 
             try
             {
-                // 1. 將 isEphemeral 增加新指令 (包含 add, remove, edit)
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu";
+                // 1. 將 isEphemeral 增加新指令 (包含 add, remove, edit 以及 bind-sheet)
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet";
 
                 // 2. 全部統一 Defer (把原本的 if 判斷直接刪除，改成這行)
                 await command.DeferAsync(ephemeral: isEphemeral);
@@ -889,13 +899,26 @@ new SlashCommandBuilder().WithName("edit-menu")
                             string sheetUrl = $"https://docs.google.com/spreadsheets/d/{sheetId}/edit";
                             string combinedUrl = $"https://docs.google.com/spreadsheets/d/{combinedSheetId}/edit";
 
-                            // 建立按鈕介面 (Link Button 點擊會直接開啟瀏覽器)
-                            var buttons = new ComponentBuilder()
-                                .WithButton($"🔗 開啟 {unitName} 專屬試算表", style: ButtonStyle.Link, url: sheetUrl)
-                                .WithButton("🔗 開啟 三單位總覽試算表", style: ButtonStyle.Link, url: combinedUrl)
-                                .WithButton("🔄 強制同步最新資料至試算表", $"force_sync_sheet_{gid}", ButtonStyle.Success);
+                            // 👇 判斷執行指令的使用者是否為管理員
+                            bool isAdmin = IsAdmin((SocketGuildUser)command.User, botConfig);
 
-                            await command.FollowupAsync($"✅ **系統已自動對應您的單位為：【{unitName}】**\n> 點擊下方按鈕即可快速前往您的資料庫，或手動執行資料同步：", components: buttons.Build());
+                            // 建立按鈕介面 (先加入所有人都能看的單一單位試算表)
+                            var buttons = new ComponentBuilder()
+                                .WithButton($"🔗 開啟 {unitName} 專屬試算表", style: ButtonStyle.Link, url: sheetUrl);
+
+                            // 👇 如果是管理員，才額外加入總覽表與強制同步按鈕
+                            if (isAdmin)
+                            {
+                                buttons.WithButton("🔗 開啟 三單位總覽試算表", style: ButtonStyle.Link, url: combinedUrl)
+                                       .WithButton("🔄 強制同步最新資料至試算表", $"force_sync_sheet_{gid}", ButtonStyle.Success);
+                            }
+
+                            // 根據身分顯示不同的文案
+                            string replyMessage = isAdmin
+                                ? $"✅ **系統已自動對應您的單位為：【{unitName}】**\n> 點擊下方按鈕即可快速前往您的資料庫，或手動執行資料同步："
+                                : $"✅ **您的所屬單位為：【{unitName}】**\n> 點擊下方按鈕即可查看本單位的專屬排行榜：";
+
+                            await command.FollowupAsync(replyMessage, components: buttons.Build());
                             break;
                         }
                     case "admin-view":
@@ -1400,11 +1423,18 @@ new SlashCommandBuilder().WithName("edit-menu")
                     }
                 }
 
+                // 👇 將原本判斷下一頁的程式碼，替換成下面這段：
                 if (root.TryGetProperty("nextPageCursor", out var nextCursor) && nextCursor.ValueKind == JsonValueKind.String)
+                {
                     cursor = nextCursor.GetString();
+                    // 🛡️ 新增這行：強制等待 0.5 秒 (500 毫秒) 再去抓下一頁
+                    await Task.Delay(500);
+                }
                 else
+                {
                     hasMore = false;
-            }
+                }
+            } // <-- 這是 while 迴圈的右括號
 
             var usersToDelete = await db.UserPoints.Where(u => u.GuildId == guildId).ToListAsync();
             var finalDeleteList = usersToDelete.Where(u => !validActiveUsers.Contains(u.RobloxUsername.ToLower())).ToList();
