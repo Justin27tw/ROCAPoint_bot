@@ -624,9 +624,19 @@ namespace ROCAPointBot
 
                     case "unbind-roca":
                         {
-                            if (!((SocketGuildUser)command.User).GuildPermissions.Administrator) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-                            if (botConfig != null) { db.Configs.Remove(botConfig); await db.SaveChangesAsync(); await command.FollowupAsync("🔓 已成功解除本伺服器的設定。"); }
-                            else { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); }
+                            if (botConfig == null) { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); return; }
+
+                            // 檢查權限：與 clear-all-data 一樣使用 IsAdmin 判斷
+                            bool isAdmin = IsAdmin((SocketGuildUser)command.User, botConfig);
+                            if (!isAdmin) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+
+                            // 建立確認按鈕
+                            var btns = new ComponentBuilder()
+                                .WithButton("⚠️ 第一位管理員確認", $"unbind_step1_{gid}", ButtonStyle.Danger)
+                                .WithButton("取消", $"unbind_cancel_{gid}", ButtonStyle.Secondary);
+
+                            await command.FollowupAsync("⚠️ **【解除綁定請求】** 確定要解除綁定嗎？這將會移除伺服器的單位對應設定！\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
+
                             break;
                         }
 
@@ -885,6 +895,86 @@ namespace ROCAPointBot
                         await component.RespondAsync("❌ 發生內部錯誤，無法辨識第一位管理員的身分。", ephemeral: true);
                     }
                 }
+                // ==================== 解除綁定 (Unbind) 雙重確認邏輯 ====================
+
+                // 處理取消按鈕
+                if (id.StartsWith("unbind_cancel_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 只有管理員可以取消此操作。", ephemeral: true); return; }
+                    await component.UpdateAsync(m => { m.Content = "❌ 解除綁定操作已由管理員取消。"; m.Components = null; });
+                    return;
+                }
+
+                // 處理第一位管理員確認
+                if (id.StartsWith("unbind_step1_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+
+                    // 將第一位管理員的 ID 記錄在按鈕的 CustomId 中，傳給下一步
+                    var btn2 = new ComponentBuilder()
+                        .WithButton("🚨 第二位管理員最終確認", $"unbind_step2_{gid}_{executor.Id}", ButtonStyle.Danger)
+                        .WithButton("取消", $"unbind_cancel_{gid}", ButtonStyle.Secondary);
+
+                    await component.UpdateAsync(m => {
+                        m.Content = $"🚨 **【最終警告】** 伺服器綁定設定將被解除！\n> 第一位管理員 {executor.Mention} 已確認。\n> 需要 **第二位不同的管理員** 按下確認才能執行！";
+                        m.Components = btn2.Build();
+                    });
+
+                    // 推播提醒管理員身分組
+                    if (botConfig != null)
+                    {
+                        string adminRoleMention = $"<@&{botConfig.AdminRoleId}>";
+                        await component.Channel.SendMessageAsync($"🔔 {adminRoleMention} 警告：{executor.Mention} 正在申請解除伺服器綁定，請另一位管理員至上方訊息進行最終確認！");
+                    }
+                    return;
+                }
+
+                // 處理第二位管理員最終確認
+                if (id.StartsWith("unbind_step2_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+
+                    // 解析出第一位管理員的 ID
+                    var parts = id.Split('_');
+                    if (parts.Length >= 4 && ulong.TryParse(parts[3], out ulong firstAdminId))
+                    {
+                        // 防呆機制：同一個人不能按兩次
+                        if (executor.Id == firstAdminId)
+                        {
+                            await component.RespondAsync("❌ 您已經確認過了！必須由 **另一位不同的管理員** 來進行最終確認。", ephemeral: true);
+                            return;
+                        }
+
+                        // 1. 執行解除綁定邏輯
+                        if (botConfig != null)
+                        {
+                            db.Configs.Remove(botConfig);
+                            await db.SaveChangesAsync();
+                        }
+
+                        // 2. 更新原本的按鈕訊息
+                        await component.UpdateAsync(m => {
+                            m.Content = $"🔓 **本伺服器已成功解除綁定！**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}。";
+                            m.Components = null;
+                        });
+
+                        // 3. (選擇性) 推播通知給國防部 Admin 頻道
+                        string firstAdminName = executor.Guild.GetUser(firstAdminId)?.Username ?? firstAdminId.ToString();
+                        string secondAdminName = executor.Username;
+
+                        _ = BroadcastToAdminChannelsAsync(gid,
+                            $"🚨 **【重大操作警告：解除綁定】**\n" +
+                            $"> 該單位已解除了 Discord 伺服器綁定！\n" +
+                            $"> 授權執行者一：**{firstAdminName}**\n" +
+                            $"> 授權執行者二：**{secondAdminName}**", true);
+                    }
+                    else
+                    {
+                        await component.RespondAsync("❌ 發生內部錯誤，無法辨識第一位管理員的身分。", ephemeral: true);
+                    }
+                    return;
+                }
+                // =======================================================================
                 // 處理強制同步試算表的按鈕
                 if (id.StartsWith("force_sync_sheet_"))
                 {
