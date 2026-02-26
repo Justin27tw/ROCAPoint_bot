@@ -197,6 +197,17 @@ namespace ROCAPointBot
                     .AddOption("id", ApplicationCommandOptionType.Integer, "紀錄 ID", isRequired: true)
                     .AddOption("reason", ApplicationCommandOptionType.String, "撤銷原因", isRequired: true) // 👈 新增這行原因必填
                     .Build(),
+                new SlashCommandBuilder().WithName("edit-admin")
+                .WithDescription("👮 新增或移除機器人管理員身分組 (需雙重確認)")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("action")
+                    .WithDescription("選擇動作")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true)
+                    .AddChoice("➕ 新增身分組", "add")
+                    .AddChoice("➖ 移除身分組", "remove"))
+                .AddOption("role", ApplicationCommandOptionType.Role, "選擇目標身分組", isRequired: true)
+                .Build(),
                 new SlashCommandBuilder().WithName("unbind-roca").WithDescription("🔓 解除綁定設定").Build(),
                 new SlashCommandBuilder().WithName("clear-all-data").WithDescription("🔥 【極度危險】刪除本伺服器所有資料").Build(),
                 new SlashCommandBuilder().WithName("daily-records").WithDescription("📅 查詢指定日期的所有點數紀錄").AddOption("date", ApplicationCommandOptionType.String, "格式: YYYY-MM-DD", isRequired: true).Build(),
@@ -424,7 +435,7 @@ namespace ROCAPointBot
                             _ = UpdateGoogleSheetAsync(gid);
 
                             // 【修改後的訊息格式：移除反引號 ` ，改用粗體 ** 】
-                            string addMsg = $"> **[點數發放]** 登記人：**{command.User.Username}**\n" +
+                            string addMsg = $"> **[➕點數發放]** 登記人：**{command.User.Username}**\n" +
                                 $"> **✅發放 {pts} 點，給 {name}**\n" +
                                 $"> **目前總計**：**{rec.Points}** 點\n" +
                                 $"> **備註：{reason}**\n" +
@@ -476,7 +487,7 @@ namespace ROCAPointBot
                             // 在背景非同步執行試算表更新，不影響 Discord 機器人的回應速度
                             _ = UpdateGoogleSheetAsync(gid);
 
-                            string removeMsg = $">  **[點數扣除/兌換]** 登記人：**{command.User.Username}**\n" +
+                            string removeMsg = $">  **[➖點數扣除/兌換]** 登記人：**{command.User.Username}**\n" +
                                                $">  **✅成功扣除 {pts} 點，自 {name}**\n" +
                                                $">  **目前剩餘**：**{rec.Points}** 點\n" +
                                                $">  **備註：{reason}** \n" +
@@ -576,8 +587,8 @@ namespace ROCAPointBot
 
                             await command.FollowupAsync(delMsg);
 
-                            bool isAnomaly = Math.Abs(targetLog.PointsAdded) >= 100; // 拿絕對值判斷是否大於等於 100
-                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，撤銷了 {targetLog.PointsAdded} 點的變動。\n>  人員：{targetLog.RobloxUsername}\n>  撤銷原因：{delReason}\n>  剩餘：{currentPoints}點", isAnomaly);
+                            // 🚨 刪除紀錄屬於敏感操作，一律視同異常並觸發 Ping 第一管理員身分組
+                            _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{command.User.Username}** 撤銷了紀錄 `#{logId}`，撤銷了 {targetLog.PointsAdded} 點的變動。\n>  人員：{targetLog.RobloxUsername}\n>  撤銷原因：{delReason}\n>  剩餘：{currentPoints}點", true);
                             break;
                         }
 
@@ -639,7 +650,39 @@ namespace ROCAPointBot
 
                             break;
                         }
+                    case "edit-admin":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("⚠️ 請先使用 `/setup-roca` 設定機器人。"); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
 
+                            string action = (string)command.Data.Options.First(x => x.Name == "action").Value;
+                            var role = (SocketRole)command.Data.Options.First(x => x.Name == "role").Value;
+
+                            // 整理目前擁有的管理員身分組名單
+                            var currentRoles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).Select(ulong.Parse).ToList() ?? new List<ulong>();
+
+                            // 防呆機制
+                            if (action == "remove" && currentRoles.Count <= 1 && currentRoles.Contains(role.Id))
+                            {
+                                await command.FollowupAsync("❌ 操作無效！您必須至少保留一個管理員身分組，否則將無人可管理機器人。");
+                                return;
+                            }
+                            if (action == "add" && currentRoles.Contains(role.Id))
+                            {
+                                await command.FollowupAsync("⚠️ 該身分組已經在管理員名單中了。");
+                                return;
+                            }
+
+                            string actionText = action == "add" ? "新增" : "移除";
+
+                            var btns = new ComponentBuilder()
+                                // 在 ID 內夾帶 action 跟 role.Id 傳給下一步
+                                .WithButton("⚠️ 第一位管理員確認", $"editadm_s1_{gid}_{action}_{role.Id}", ButtonStyle.Danger)
+                                .WithButton("取消", $"editadm_cancel_{gid}", ButtonStyle.Secondary);
+
+                            await command.FollowupAsync($"⚠️ **【權限變更請求】** 確定要 **{actionText}** <@&{role.Id}> 的管理員權限嗎？\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
+                            break;
+                        }
                     case "points":
                         {
                             var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
@@ -971,6 +1014,82 @@ namespace ROCAPointBot
                     else
                     {
                         await component.RespondAsync("❌ 發生內部錯誤，無法辨識第一位管理員的身分。", ephemeral: true);
+                    }
+                    return;
+                }
+                // =======================================================================
+                // ==================== 變更管理員身分組 (Edit Admin) 雙重確認邏輯 ====================
+
+                // 處理取消按鈕
+                if (id.StartsWith("editadm_cancel_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 只有管理員可以取消此操作。", ephemeral: true); return; }
+                    await component.UpdateAsync(m => { m.Content = "❌ 權限變更操作已由管理員取消。"; m.Components = null; });
+                    return;
+                }
+
+                // 處理第一位管理員確認
+                if (id.StartsWith("editadm_s1_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+
+                    var parts = id.Split('_');
+                    string action = parts[3];
+                    ulong roleId = ulong.Parse(parts[4]);
+                    string actionText = action == "add" ? "新增" : "移除";
+
+                    // 夾帶第一位管理員 ID
+                    var btn2 = new ComponentBuilder()
+                        .WithButton("🚨 第二位管理員最終確認", $"editadm_s2_{gid}_{action}_{roleId}_{executor.Id}", ButtonStyle.Danger)
+                        .WithButton("取消", $"editadm_cancel_{gid}", ButtonStyle.Secondary);
+
+                    await component.UpdateAsync(m => {
+                        m.Content = $"🚨 **【最終警告】** 即將 **{actionText}** <@&{roleId}> 的管理員權限！\n> 第一位管理員 {executor.Mention} 已確認。\n> 需要 **第二位不同的管理員** 按下確認才能執行！";
+                        m.Components = btn2.Build();
+                    });
+
+                    if (botConfig != null)
+                    {
+                        string adminRoleMention = $"<@&{botConfig.AdminRoleId}>";
+                        await component.Channel.SendMessageAsync($"🔔 {adminRoleMention} 警告：{executor.Mention} 正在申請 {actionText} 管理身分組，請另一位管理員至上方訊息進行最終確認！");
+                    }
+                    return;
+                }
+
+                // 處理第二位管理員最終確認
+                if (id.StartsWith("editadm_s2_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+
+                    var parts = id.Split('_');
+                    string action = parts[3];
+                    ulong roleId = ulong.Parse(parts[4]);
+                    ulong firstAdminId = ulong.Parse(parts[5]);
+
+                    if (executor.Id == firstAdminId)
+                    {
+                        await component.RespondAsync("❌ 您已經確認過了！必須由 **另一位不同的管理員** 來進行最終確認。", ephemeral: true);
+                        return;
+                    }
+
+                    if (botConfig != null)
+                    {
+                        var currentRoles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).Select(ulong.Parse).ToList() ?? new List<ulong>();
+
+                        if (action == "add") { if (!currentRoles.Contains(roleId)) currentRoles.Add(roleId); }
+                        else if (action == "remove") { if (currentRoles.Contains(roleId)) currentRoles.Remove(roleId); }
+
+                        // 重新組合成字串並更新
+                        botConfig.AdminRoleIds = string.Join(",", currentRoles);
+                        if (currentRoles.Any()) botConfig.AdminRoleId = currentRoles.First(); // 同步更新舊版相容的單一身分組 ID
+
+                        await db.SaveChangesAsync();
+
+                        string actionText = action == "add" ? "新增" : "移除";
+                        await component.UpdateAsync(m => {
+                            m.Content = $"✅ **權限變更成功！** 已成功 **{actionText}** <@&{roleId}> 的管理員權限。\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}。";
+                            m.Components = null;
+                        });
                     }
                     return;
                 }
