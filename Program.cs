@@ -281,7 +281,14 @@ namespace ROCAPointBot
                 new SlashCommandBuilder().WithName("remove-menu-item")
                     .WithDescription("➖ 移除草稿中的 MENU 品項")
                     .AddOption("item_name", ApplicationCommandOptionType.String, "請輸入要移除的完整品項名稱", isRequired: true).Build(),
-
+                // 在 new SlashCommandBuilder().WithName("remove-menu-item")... 的下方加入這段：
+                new SlashCommandBuilder().WithName("change-menu-item")
+                    .WithDescription("🔄 替換草稿中的 MENU 品項 (直接覆寫舊品項以保持原本的排列順序)")
+                    .AddOption("old_item_name", ApplicationCommandOptionType.String, "要被替換的原品項【完整名稱】", isRequired: true)
+                    .AddOption("new_item_name", ApplicationCommandOptionType.String, "新的品項名稱", isRequired: true)
+                    .AddOption("points", ApplicationCommandOptionType.Integer, "新的所需點數 (設為 0 將視為分類標題)", isRequired: true)
+                    .AddOption("note", ApplicationCommandOptionType.String, "新的條件或備註 (選填)", isRequired: false)
+                    .Build(),
                 new SlashCommandBuilder().WithName("edit-menu")
                     .WithDescription("🛍️ 預覽目前的 MENU 草稿，並申請雙人確認發布").Build(),
                 new SlashCommandBuilder().WithName("menu").WithDescription("📜 查看目前的兌換點數 MENU (僅自己可見)").Build(),
@@ -300,8 +307,8 @@ namespace ROCAPointBot
 
             try
             {
-                // 將 HandleSlashCommandAsync 裡的 bool isEphemeral = ... 替換為：
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info";
+                // 將原本的 bool isEphemeral = ... 替換為以下這行 (在最後面加上了 change-menu-item)：
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info" || command.Data.Name == "change-menu-item";
                 // 2. 全部統一 Defer (把原本的 if 判斷直接刪除，改成這行)
                 await command.DeferAsync(ephemeral: isEphemeral);
 
@@ -927,8 +934,37 @@ namespace ROCAPointBot
                             await command.FollowupAsync($"✅ 已從草稿中移除品項：`{itemName}`\n> 請使用 `/edit-menu` 確認最新狀態。");
                             break;
                         }
+                    case "change-menu-item":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
 
-                    
+                            string oldItemName = (string)command.Data.Options.First(x => x.Name == "old_item_name").Value;
+                            string newItemName = (string)command.Data.Options.First(x => x.Name == "new_item_name").Value;
+                            int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
+                            string note = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string;
+
+                            // 尋找要被替換的舊品項
+                            var itemToEdit = await db.RewardMenuItems.FirstOrDefaultAsync(x => x.GuildId == gid && x.ItemName == oldItemName);
+
+                            if (itemToEdit == null)
+                            {
+                                await command.FollowupAsync($"❌ 草稿中找不到名稱為 `{oldItemName}` 的品項。請確認輸入的名稱是否完全相符。");
+                                return;
+                            }
+
+                            // 覆寫內容，但不改變 Id (這樣就能保留原本的順序)
+                            itemToEdit.ItemName = newItemName;
+                            itemToEdit.Points = points;
+                            itemToEdit.Note = note;
+
+                            await db.SaveChangesAsync();
+
+                            string msg = points <= 0 ? $"✅ 已成功替換為分類標題：`{newItemName}`" : $"✅ 已成功替換為品項：`{newItemName}` (點數: {points})";
+                            await command.FollowupAsync($"{msg}\n> *(原排列順序已保留)* 此更動目前僅存在於草稿中，請使用 `/edit-menu` 預覽並發布。");
+                            break;
+                        }
+
 
                     case "menu":
                         {
