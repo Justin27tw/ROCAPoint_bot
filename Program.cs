@@ -558,9 +558,9 @@ namespace ROCAPointBot
 
                             switch (botConfig.RobloxGroupId)
                             {
-                                case "13549943": maxRank = 239; unitName = "憲兵"; break; // 👈 順便記錄單位名稱
-                                case "13662982": maxRank = 120; unitName = "裝甲"; break;
-                                case "16223475": maxRank = 55; unitName = "航特"; break;
+                                case "13549943": maxRank = 239; unitName = "國防部憲兵指揮部"; break; // 👈 順便記錄單位名稱
+                                case "13662982": maxRank = 120; unitName = "陸軍裝甲第五八四旅"; break;
+                                case "16223475": maxRank = 55; unitName = "陸軍航空特戰指揮部"; break;
                                 default: unitName = "自訂單位"; break;
                             }
                             int minRank = 1;
@@ -594,7 +594,7 @@ namespace ROCAPointBot
                                     else hasMore = false;
                                 }
                                 // 👇 修改這行：隱藏 Rank 條件，只顯示部門名稱與總人數
-                                await command.FollowupAsync($"👥 **群組人數查詢**\n> 您所在的部門 **[{unitName}]** 目前總人數為：**{count}** 人。\n> *(此數據為即時向 Roblox 伺服器查詢之結果)*");
+                                await command.FollowupAsync($"👥 **部門人數查詢**\n> 您所在的部門 **[{unitName}]** 目前總人數為：**{count}** 人。\n> *(此數據為即時向 Roblox 伺服器查詢之結果)*");
                             }
                             catch (Exception ex)
                             {
