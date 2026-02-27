@@ -554,11 +554,14 @@ namespace ROCAPointBot
                             await command.FollowupAsync("⏳ 正在向 Roblox 查詢資料，請稍候...");
 
                             int maxRank = 255;
+                            string unitName = "未知單位"; // 👈 新增變數用來儲存單位名稱
+
                             switch (botConfig.RobloxGroupId)
                             {
-                                case "13549943": maxRank = 239; break;
-                                case "13662982": maxRank = 120; break;
-                                case "16223475": maxRank = 55; break;
+                                case "13549943": maxRank = 239; unitName = "憲兵"; break; // 👈 順便記錄單位名稱
+                                case "13662982": maxRank = 120; unitName = "裝甲"; break;
+                                case "16223475": maxRank = 55; unitName = "航特"; break;
+                                default: unitName = "自訂單位"; break;
                             }
                             int minRank = 1;
                             int count = 0;
@@ -590,7 +593,8 @@ namespace ROCAPointBot
                                     }
                                     else hasMore = false;
                                 }
-                                await command.FollowupAsync($"👥 **群組人數查詢**\n> 目前 Roblox 綁定群組 (`{botConfig.RobloxGroupId}`) 中，符合階級條件 (Rank {minRank}~{maxRank}) 的在職總人數為：**{count}** 人。\n> *(此數據為即時查詢結果)*");
+                                // 👇 修改這行：隱藏 Rank 條件，只顯示部門名稱與總人數
+                                await command.FollowupAsync($"👥 **群組人數查詢**\n> 您所在的部門 **[{unitName}]** 目前總人數為：**{count}** 人。\n> *(此數據為即時向 Roblox 伺服器查詢之結果)*");
                             }
                             catch (Exception ex)
                             {
@@ -843,11 +847,6 @@ namespace ROCAPointBot
                             await command.FollowupAsync(dSb.ToString());
                             break;
                         }
-
-                    
-
-                    
-                    
                     case "points":
                         {
                             var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
