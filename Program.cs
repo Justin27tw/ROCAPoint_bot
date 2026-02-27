@@ -81,7 +81,12 @@ namespace ROCAPointBot
         }
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var config = new DiscordSocketConfig { GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.GuildMembers };
+            // 在 protected override async Task ExecuteAsync 內：
+            var config = new DiscordSocketConfig
+            {
+                GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.GuildMembers,
+                AlwaysDownloadUsers = true // 👈 新增這行：強制機器人抓取完整伺服器名單以利計算人數
+            };
             _client = new DiscordSocketClient(config);
             // 👇 1. 將這裡原本的 _client.Ready 替換成這段：
             _client.Ready += async () =>
@@ -268,19 +273,22 @@ namespace ROCAPointBot
                     .AddOption("channel", ApplicationCommandOptionType.Channel, "選擇要接收推播的文字頻道", isRequired: true)
                     .Build(),
                new SlashCommandBuilder().WithName("add-menu-item")
-    .WithDescription("➕ 新增兌換 MENU 品項 (僅暫存於草稿，需透過 /edit-menu 發布)")
-    .AddOption("item_name", ApplicationCommandOptionType.String, "品項名稱 (若要新增分類標題，請將點數設為 0)", isRequired: true)
-    .AddOption("points", ApplicationCommandOptionType.Integer, "所需點數 (設為 0 將視為分類標題)", isRequired: true)
-    .AddOption("note", ApplicationCommandOptionType.String, "條件或備註 (選填)", isRequired: false).Build(),
+                    .WithDescription("➕ 新增兌換 MENU 品項 (僅暫存於草稿，需透過 /edit-menu 發布)")
+                    .AddOption("item_name", ApplicationCommandOptionType.String, "品項名稱 (若要新增分類標題，請將點數設為 0)", isRequired: true)
+                    .AddOption("points", ApplicationCommandOptionType.Integer, "所需點數 (設為 0 將視為分類標題)", isRequired: true)
+                    .AddOption("note", ApplicationCommandOptionType.String, "條件或備註 (選填)", isRequired: false).Build(),
 
-new SlashCommandBuilder().WithName("remove-menu-item")
-    .WithDescription("➖ 移除草稿中的 MENU 品項")
-    .AddOption("item_name", ApplicationCommandOptionType.String, "請輸入要移除的完整品項名稱", isRequired: true).Build(),
+                new SlashCommandBuilder().WithName("remove-menu-item")
+                    .WithDescription("➖ 移除草稿中的 MENU 品項")
+                    .AddOption("item_name", ApplicationCommandOptionType.String, "請輸入要移除的完整品項名稱", isRequired: true).Build(),
 
-new SlashCommandBuilder().WithName("edit-menu")
-    .WithDescription("🛍️ 預覽目前的 MENU 草稿，並申請雙人確認發布").Build(),
+                new SlashCommandBuilder().WithName("edit-menu")
+                    .WithDescription("🛍️ 預覽目前的 MENU 草稿，並申請雙人確認發布").Build(),
                 new SlashCommandBuilder().WithName("menu").WithDescription("📜 查看目前的兌換點數 MENU (僅自己可見)").Build(),
                 new SlashCommandBuilder().WithName("view-admins").WithDescription("👮 查看目前擁有權限的管理員身分組名單").Build(),
+                // 在 var commands = new List<ApplicationCommandProperties> 中新增：
+                new SlashCommandBuilder().WithName("my-info").WithDescription("👤 查詢自己的點數與近期十筆紀錄").Build(),
+                new SlashCommandBuilder().WithName("group-info").WithDescription("👥 查詢已綁定 Roblox 群組中符合資格的總人數").Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -292,9 +300,8 @@ new SlashCommandBuilder().WithName("edit-menu")
 
             try
             {
-                // 1. 將 isEphemeral 增加新指令 (包含 add, remove, edit 以及 bind-sheet)
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet";
-
+                // 將 HandleSlashCommandAsync 裡的 bool isEphemeral = ... 替換為：
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info";
                 // 2. 全部統一 Defer (把原本的 if 判斷直接刪除，改成這行)
                 await command.DeferAsync(ephemeral: isEphemeral);
 
@@ -457,7 +464,179 @@ new SlashCommandBuilder().WithName("edit-menu")
                             }
                             break;
                         }
+                    case "clear-all-data":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
 
+                            int adminCount = GetAdminCount(guildChannel.Guild, botConfig);
+                            bool requiresDual = adminCount >= 2;
+
+                            string btnId = requiresDual ? $"clear_step1_{gid}" : $"clear_single_{gid}";
+                            string btnText = requiresDual ? "⚠️ 第一位管理員確認" : "⚠️ 確認清空 (單人管理員)";
+
+                            var btns = new ComponentBuilder()
+                                .WithButton(btnText, btnId, ButtonStyle.Danger)
+                                .WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
+
+                            string msg = requiresDual ? "\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。" : $"\n> ⚠️ 系統偵測到目前管理員僅有 {adminCount} 人，已切換為**單人快速確認**。";
+                            await command.FollowupAsync($"⚠️ **【資料清空請求】** 確定要清空所有資料嗎？{msg}", components: btns.Build());
+                            break;
+                        }
+
+                    case "unbind-roca":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+
+                            int adminCount = GetAdminCount(guildChannel.Guild, botConfig);
+                            bool requiresDual = adminCount >= 2;
+
+                            string btnId = requiresDual ? $"unbind_step1_{gid}" : $"unbind_single_{gid}";
+                            string btnText = requiresDual ? "⚠️ 第一位管理員確認" : "⚠️ 確認解除 (單人管理員)";
+
+                            var btns = new ComponentBuilder()
+                                .WithButton(btnText, btnId, ButtonStyle.Danger)
+                                .WithButton("取消", $"unbind_cancel_{gid}", ButtonStyle.Secondary);
+
+                            string msg = requiresDual ? "\n> 執行此動作需要 **兩名管理員** 共同確認。" : $"\n> ⚠️ 系統偵測到目前管理員僅有 {adminCount} 人，已切換為**單人快速確認**。";
+                            await command.FollowupAsync($"⚠️ **【解除綁定請求】** 確定要解除綁定嗎？這將會移除伺服器的單位對應設定！{msg}", components: btns.Build());
+                            break;
+                        }
+
+                    case "edit-admin":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("⚠️ 請先使用 `/setup-roca` 設定機器人。"); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+
+                            string action = (string)command.Data.Options.First(x => x.Name == "action").Value;
+                            var role = (SocketRole)command.Data.Options.First(x => x.Name == "role").Value;
+                            var currentRoles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).Select(ulong.Parse).ToList() ?? new List<ulong>();
+
+                            if (action == "remove" && currentRoles.Count <= 1 && currentRoles.Contains(role.Id)) { await command.FollowupAsync("❌ 操作無效！您必須至少保留一個管理員身分組。"); return; }
+                            if (action == "add" && currentRoles.Contains(role.Id)) { await command.FollowupAsync("⚠️ 該身分組已經在管理員名單中了。"); return; }
+
+                            string actionText = action == "add" ? "新增" : "移除";
+                            int adminCount = GetAdminCount(guildChannel.Guild, botConfig);
+                            bool requiresDual = adminCount >= 2;
+
+                            string btnId = requiresDual ? $"editadm_s1_{gid}_{action}_{role.Id}" : $"editadm_single_{gid}_{action}_{role.Id}";
+                            string btnText = requiresDual ? "⚠️ 第一位管理員確認" : "⚠️ 確認變更 (單人管理員)";
+
+                            var btns = new ComponentBuilder()
+                                .WithButton(btnText, btnId, ButtonStyle.Danger)
+                                .WithButton("取消", $"editadm_cancel_{gid}", ButtonStyle.Secondary);
+
+                            string msg = requiresDual ? "\n> 執行此動作需要 **兩名管理員** 共同確認。" : $"\n> ⚠️ 系統偵測到目前管理員僅有 {adminCount} 人，已切換為**單人快速確認**。";
+                            await command.FollowupAsync($"⚠️ **【權限變更請求】** 確定要 **{actionText}** <@&{role.Id}> 的管理員權限嗎？{msg}", components: btns.Build());
+                            break;
+                        }
+
+                    case "edit-menu": // 👈 這裡永久拔除雙管理員確認
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
+
+                            var items = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
+                            string preview = FormatMenuItems(items);
+
+                            var btns = new ComponentBuilder()
+                                .WithButton("✅ 草稿無誤，立即發布", $"menuok_single_{gid}", ButtonStyle.Success)
+                                .WithButton("取消 (繼續修改)", $"menuno_{gid}", ButtonStyle.Secondary);
+
+                            await command.FollowupAsync($"👁️ **【草稿預覽】** 以下是目前草稿的排版結果：\n{preview}\n> 若確認無誤，請點擊下方按鈕直接發布更新。", components: btns.Build());
+                            break;
+                        }
+
+                    case "group-info":
+                        {
+                            if (botConfig == null || string.IsNullOrEmpty(botConfig.RobloxGroupId)) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                            await command.FollowupAsync("⏳ 正在向 Roblox 查詢資料，請稍候...");
+
+                            int maxRank = 255;
+                            switch (botConfig.RobloxGroupId)
+                            {
+                                case "13549943": maxRank = 239; break;
+                                case "13662982": maxRank = 120; break;
+                                case "16223475": maxRank = 55; break;
+                            }
+                            int minRank = 1;
+                            int count = 0;
+                            string cursor = "";
+                            bool hasMore = true;
+
+                            try
+                            {
+                                while (hasMore)
+                                {
+                                    string url = $"https://groups.roblox.com/v1/groups/{botConfig.RobloxGroupId}/users?limit=100";
+                                    if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={cursor}";
+                                    var res = await _http.GetAsync(url);
+                                    if (!res.IsSuccessStatusCode) break;
+
+                                    var json = await res.Content.ReadAsStringAsync();
+                                    using var doc = JsonDocument.Parse(json);
+                                    var root = doc.RootElement;
+                                    var data = root.GetProperty("data");
+                                    foreach (var item in data.EnumerateArray())
+                                    {
+                                        int rank = item.GetProperty("role").GetProperty("rank").GetInt32();
+                                        if (rank >= minRank && rank <= maxRank) count++;
+                                    }
+                                    if (root.TryGetProperty("nextPageCursor", out var nextCursor) && nextCursor.ValueKind == JsonValueKind.String)
+                                    {
+                                        cursor = nextCursor.GetString();
+                                        await Task.Delay(500); // 防頻頸
+                                    }
+                                    else hasMore = false;
+                                }
+                                await command.FollowupAsync($"👥 **群組人數查詢**\n> 目前 Roblox 綁定群組 (`{botConfig.RobloxGroupId}`) 中，符合階級條件 (Rank {minRank}~{maxRank}) 的在職總人數為：**{count}** 人。\n> *(此數據為即時查詢結果)*");
+                            }
+                            catch (Exception ex)
+                            {
+                                await command.FollowupAsync($"❌ 查詢時發生錯誤，請稍後再試: {ex.Message}");
+                            }
+                            break;
+                        }
+
+                    case "my-info":
+                        {
+                            var targetUser = (SocketGuildUser)command.User;
+                            string targetName = targetUser.Nickname ?? targetUser.Username;
+                            // 自動識別 `]` 後面的文字當作 Roblox Name
+                            if (targetName.Contains("]")) targetName = targetName.Substring(targetName.LastIndexOf(']') + 1).Trim();
+
+                            var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetName.ToLower());
+                            int currentPoints = userPoint != null ? userPoint.Points : 0;
+
+                            var logs = await db.PointLogs.Where(l => l.GuildId == gid && l.RobloxUsername.ToLower() == targetName.ToLower() && !l.IsDeleted).OrderByDescending(l => l.Timestamp).Take(10).ToListAsync();
+
+                            var sb = new StringBuilder($"### 👤 **{targetName}** 的個人資訊\n");
+                            sb.AppendLine($"> **目前可用點數：** `{currentPoints}` 點\n");
+
+                            if (!logs.Any())
+                            {
+                                sb.AppendLine("📭 您尚無近期的點數變動紀錄。");
+                            }
+                            else
+                            {
+                                sb.AppendLine("📜 **近期紀錄 (最多顯示十筆)：**\n```ansi\n");
+                                foreach (var l in logs)
+                                {
+                                    string idRaw = $"[ID: {l.Id}]".PadRight(9);
+                                    string timeStr = l.Timestamp.ToString("MM/dd HH:mm");
+                                    string ptsRaw = (l.PointsAdded > 0 ? $"+{l.PointsAdded}" : l.PointsAdded.ToString()).PadLeft(5);
+                                    string adminStr = l.AdminName.PadRight(12);
+                                    string idStr = $"\u001b[34m{idRaw}\u001b[0m";
+                                    string ptsStr = (l.PointsAdded > 0 ? "\u001b[32m" : "\u001b[31m") + $"{ptsRaw}\u001b[0m";
+                                    sb.AppendLine($"{idStr} \u001b[30m{timeStr}\u001b[0m | ➔ {ptsStr} 點 | 登記: {adminStr} | 原因: {l.Reason}");
+                                }
+                                sb.AppendLine("```");
+                            }
+                            sb.AppendLine($"\n> *數據抓取時間：{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}*");
+                            await command.FollowupAsync(sb.ToString());
+                            break;
+                        }
                     case "addpoint":
                         {
                             if (botConfig == null) { await command.FollowupAsync("❌ 未設定。請先使用 /setup-roca"); break; }
@@ -665,73 +844,10 @@ new SlashCommandBuilder().WithName("edit-menu")
                             break;
                         }
 
-                    case "clear-all-data":
-                        {
-                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                    
 
-                            // 確保一開始執行的也是管理員
-                            bool isAdmin = IsAdmin((SocketGuildUser)command.User, botConfig);
-                            if (!isAdmin) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-
-                            var btns = new ComponentBuilder()
-                                .WithButton("⚠️ 第一位管理員確認", $"clear_step1_{gid}", ButtonStyle.Danger)
-                                .WithButton("取消", $"clear_cancel_{gid}", ButtonStyle.Secondary);
-
-                            await command.FollowupAsync("⚠️ **【資料清空請求】** 確定要清空所有資料嗎？\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
-
-                            break;
-                        }
-
-                    case "unbind-roca":
-                        {
-                            if (botConfig == null) { await command.FollowupAsync("⚠️ 本伺服器尚未進行綁定。"); return; }
-
-                            // 檢查權限：與 clear-all-data 一樣使用 IsAdmin 判斷
-                            bool isAdmin = IsAdmin((SocketGuildUser)command.User, botConfig);
-                            if (!isAdmin) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-
-                            // 建立確認按鈕
-                            var btns = new ComponentBuilder()
-                                .WithButton("⚠️ 第一位管理員確認", $"unbind_step1_{gid}", ButtonStyle.Danger)
-                                .WithButton("取消", $"unbind_cancel_{gid}", ButtonStyle.Secondary);
-
-                            await command.FollowupAsync("⚠️ **【解除綁定請求】** 確定要解除綁定嗎？這將會移除伺服器的單位對應設定！\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
-
-                            break;
-                        }
-                    case "edit-admin":
-                        {
-                            if (botConfig == null) { await command.FollowupAsync("⚠️ 請先使用 `/setup-roca` 設定機器人。"); return; }
-                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-
-                            string action = (string)command.Data.Options.First(x => x.Name == "action").Value;
-                            var role = (SocketRole)command.Data.Options.First(x => x.Name == "role").Value;
-
-                            // 整理目前擁有的管理員身分組名單
-                            var currentRoles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).Select(ulong.Parse).ToList() ?? new List<ulong>();
-
-                            // 防呆機制
-                            if (action == "remove" && currentRoles.Count <= 1 && currentRoles.Contains(role.Id))
-                            {
-                                await command.FollowupAsync("❌ 操作無效！您必須至少保留一個管理員身分組，否則將無人可管理機器人。");
-                                return;
-                            }
-                            if (action == "add" && currentRoles.Contains(role.Id))
-                            {
-                                await command.FollowupAsync("⚠️ 該身分組已經在管理員名單中了。");
-                                return;
-                            }
-
-                            string actionText = action == "add" ? "新增" : "移除";
-
-                            var btns = new ComponentBuilder()
-                                // 在 ID 內夾帶 action 跟 role.Id 傳給下一步
-                                .WithButton("⚠️ 第一位管理員確認", $"editadm_s1_{gid}_{action}_{role.Id}", ButtonStyle.Danger)
-                                .WithButton("取消", $"editadm_cancel_{gid}", ButtonStyle.Secondary);
-
-                            await command.FollowupAsync($"⚠️ **【權限變更請求】** 確定要 **{actionText}** <@&{role.Id}> 的管理員權限嗎？\n> 執行此動作需要 **兩名管理員** 共同確認，大家都會看到此操作。", components: btns.Build());
-                            break;
-                        }
+                    
+                    
                     case "points":
                         {
                             var targetUser = (SocketGuildUser)command.Data.Options.First(x => x.Name == "user").Value;
@@ -813,21 +929,7 @@ new SlashCommandBuilder().WithName("edit-menu")
                             break;
                         }
 
-                    case "edit-menu":
-                        {
-                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
-                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 限管理員執行。"); return; }
-
-                            var items = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
-                            string preview = FormatMenuItems(items);
-
-                            var btns = new ComponentBuilder()
-                                .WithButton("📤 沒問題，申請發布", $"menureq_{gid}", ButtonStyle.Success)
-                                .WithButton("取消 (繼續修改)", $"menuno_{gid}", ButtonStyle.Secondary);
-
-                            await command.FollowupAsync($"👁️ **【草稿預覽】** 以下是目前草稿的排版結果：\n{preview}\n> 若確認無誤，請點擊下方按鈕申請發布（將會 Ping 管理員進行最終確認）。", components: btns.Build());
-                            break;
-                        }
+                    
 
                     case "menu":
                         {
@@ -1274,77 +1376,69 @@ new SlashCommandBuilder().WithName("edit-menu")
                     await component.UpdateAsync(m => { m.Content = "❌ 已取消發布申請，您可以繼續使用 `/add-menu-item` 或 `/remove-menu-item` 修改草稿。"; m.Components = null; });
                     return;
                 }
-
-                // 申請發布 (由第一位管理員按下)
-                if (id.StartsWith("menureq_"))
+                // 1. 單人直接清空資料
+                if (id.StartsWith("clear_single_"))
                 {
                     if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
-
-                    // 更新原本的隱藏訊息
-                    await component.UpdateAsync(m => { m.Content = "✅ **已送出發布申請！** 請等待另一位管理員於頻道中確認。"; m.Components = null; });
-
-                    // 在頻道中公開發送申請文 (Ping 管理員)
-                    var btn = new ComponentBuilder().WithButton("🔍 檢視草稿並確認", $"menupvw_{gid}_{executor.Id}", ButtonStyle.Primary);
-                    string adminRoleMention = botConfig != null ? $"<@&{botConfig.AdminRoleId}>" : "管理員";
-                    await component.Channel.SendMessageAsync($"🔔 {adminRoleMention} 警告：{executor.Mention} 已完成 MENU 編輯並申請發布！\n> 請另一位管理員點擊下方按鈕**檢視預覽畫面**並進行最終確認。", components: btn.Build());
+                    foreach (var user in db.UserPoints.Where(u => u.GuildId == gid)) user.Points = 0;
+                    foreach (var log in db.PointLogs.Where(l => l.GuildId == gid)) log.IsDeleted = true;
+                    await db.SaveChangesAsync();
+                    await component.UpdateAsync(m => { m.Content = $"🔥 **全體人員點數已成功歸零！**\n> (單人確認模式) 執行者：{executor.Mention}。"; m.Components = null; });
+                    _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【重大操作警告：全體點數歸零】**\n> 執行者：**{executor.Username}** (單人確認模式)", true);
                     return;
                 }
 
-                // 第二位管理員點擊「檢視草稿並確認」(這會彈出只有他看得到的隱藏訊息)
-                if (id.StartsWith("menupvw_"))
+                // 2. 單人直接解除綁定
+                if (id.StartsWith("unbind_single_"))
                 {
                     if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
-                    var parts = id.Split('_');
-                    ulong firstAdminId = ulong.Parse(parts[2]);
+                    if (botConfig != null) { db.Configs.Remove(botConfig); await db.SaveChangesAsync(); }
+                    await component.UpdateAsync(m => { m.Content = $"🔓 **本伺服器已成功解除綁定！**\n> (單人確認模式) 執行者：{executor.Mention}。"; m.Components = null; });
+                    _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【重大操作警告：解除綁定】**\n> 執行者：**{executor.Username}** (單人確認模式)", true);
+                    return;
+                }
 
-                    if (executor.Id == firstAdminId)
+                // 3. 單人直接變更管理員
+                if (id.StartsWith("editadm_single_"))
+                {
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+                    var parts = id.Split('_'); string action = parts[3]; ulong roleId = ulong.Parse(parts[4]);
+                    if (botConfig != null)
                     {
-                        await component.RespondAsync("❌ 您是申請人！必須由 **另一位管理員** 來進行檢視與確認。", ephemeral: true); return;
+                        var currentRoles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).Select(ulong.Parse).ToList() ?? new List<ulong>();
+                        if (action == "add") { if (!currentRoles.Contains(roleId)) currentRoles.Add(roleId); }
+                        else if (action == "remove") { if (currentRoles.Contains(roleId)) currentRoles.Remove(roleId); }
+                        botConfig.AdminRoleIds = string.Join(",", currentRoles);
+                        if (currentRoles.Any()) botConfig.AdminRoleId = currentRoles.First();
+                        await db.SaveChangesAsync();
+                        string actionText = action == "add" ? "新增" : "移除";
+                        await component.UpdateAsync(m => { m.Content = $"✅ **權限變更成功！** 已成功 **{actionText}** <@&{roleId}> 的管理員權限。\n> (單人確認模式) 執行者：{executor.Mention}。"; m.Components = null; });
+                        _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【管理員權限變更】**\n> 動作：**{actionText}** <@&{roleId}>\n> 執行者：{executor.Mention} (單人確認模式)", true);
                     }
-
-                    // 抓取草稿並產生預覽
-                    var items = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
-                    string preview = FormatMenuItems(items);
-
-                    var btns = new ComponentBuilder()
-                        .WithButton("✅ 草稿無誤，立即發布", $"menuok_{gid}_{firstAdminId}", ButtonStyle.Danger)
-                        .WithButton("❌ 退回 (取消發布)", $"menuno_{gid}", ButtonStyle.Secondary);
-
-                    // 回覆隱藏訊息給第二位管理員看
-                    await component.RespondAsync($"👁️ **【發布前最終確認】** 申請人：<@{firstAdminId}>\n以下是草稿排版預覽：\n{preview}\n> 確定要將此版本覆蓋目前線上的 MENU 嗎？", components: btns.Build(), ephemeral: true);
                     return;
                 }
 
-                // 第二位管理員按下「立即發布」
-                if (id.StartsWith("menuok_"))
+                // 4. 新的單人發布 MENU 邏輯
+                if (id.StartsWith("menuok_single_"))
                 {
                     if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
-                    var parts = id.Split('_');
-                    ulong firstAdminId = ulong.Parse(parts[2]);
-
                     var items = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
                     string finalFormattedMenu = FormatMenuItems(items);
 
-                    // 將排版好的結果直接存入資料庫
                     if (botConfig != null)
                     {
                         botConfig.RewardMenuContent = finalFormattedMenu;
                         botConfig.RewardMenuUpdateTime = Program.GetTaipeiTime();
                         await db.SaveChangesAsync();
                     }
-
                     string timeStr = botConfig.RewardMenuUpdateTime.Value.ToString("yyyy年MM月dd日HH:mm");
-
-                    // 更新隱藏訊息
                     await component.UpdateAsync(m => { m.Content = $"✅ **發布成功！** 線上 MENU 已更新。"; m.Components = null; });
-
-                    // 發送公開廣播與 Log 頻道
-                    string publicMsg = $"✅ **MENU 已成功更新發布！**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}\n\n{finalFormattedMenu}\n\n> *此為 {timeStr} 公告*";
+                    string publicMsg = $"✅ **MENU 已成功更新發布！**\n> 執行者：{executor.Mention}\n\n{finalFormattedMenu}\n\n> *此為 {timeStr} 公告*";
                     await component.Channel.SendMessageAsync(publicMsg);
-
-                    _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【MENU 更新公告】**\n> 授權執行者：<@{firstAdminId}> 與 {executor.Mention}\n> 新版 MENU 已生效，請大家可使用 `/menu` 查看最新品項。", true);
+                    _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【MENU 更新公告】**\n> 執行者：{executor.Mention}\n> 新版 MENU 已生效，請大家可使用 `/menu` 查看最新品項。", true);
                     return;
                 }
+
                 // ================================================================
                 // 處理強制同步試算表的按鈕
                 if (id.StartsWith("force_sync_sheet_"))
@@ -1484,6 +1578,24 @@ new SlashCommandBuilder().WithName("edit-menu")
             return length;
         }
 
+        // 自動計算該伺服器擁有「機器人管理員身分組」的總人數
+        private int GetAdminCount(SocketGuild guild, BotConfig config)
+        {
+            if (config == null) return 0;
+            var roleIds = new List<ulong>();
+            if (!string.IsNullOrEmpty(config.AdminRoleIds))
+            {
+                roleIds = config.AdminRoleIds.Split(',').Where(s => !string.IsNullOrEmpty(s)).Select(ulong.Parse).ToList();
+            }
+            if (!roleIds.Any() && config.AdminRoleId != 0) roleIds.Add(config.AdminRoleId);
+
+            int count = 0;
+            foreach (var user in guild.Users)
+            {
+                if (user.Roles.Any(r => roleIds.Contains(r.Id))) count++;
+            }
+            return count;
+        }
         // 補齊空格，讓所有中英文都能完美對齊
         private string PadRightCustom(string s, int totalWidth)
         {
