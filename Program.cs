@@ -272,22 +272,38 @@ namespace ROCAPointBot
                     .WithDescription("📝 設定本伺服器的專屬紀錄(Log)推播頻道")
                     .AddOption("channel", ApplicationCommandOptionType.Channel, "選擇要接收推播的文字頻道", isRequired: true)
                     .Build(),
-               new SlashCommandBuilder().WithName("add-menu-item")
+              new SlashCommandBuilder().WithName("add-menu-item")
                     .WithDescription("➕ 新增兌換 MENU 品項 (僅暫存於草稿，需透過 /edit-menu 發布)")
                     .AddOption("item_name", ApplicationCommandOptionType.String, "品項名稱 (若要新增分類標題，請將點數設為 0)", isRequired: true)
                     .AddOption("points", ApplicationCommandOptionType.Integer, "所需點數 (設為 0 將視為分類標題)", isRequired: true)
-                    .AddOption("note", ApplicationCommandOptionType.String, "條件或備註 (選填)", isRequired: false).Build(),
+                    // 👇 新增這段：讓管理員選擇標籤類型
+                    .AddOption(new SlashCommandOptionBuilder()
+                        .WithName("note_type")
+                        .WithDescription("選擇備註的標籤類型 (預設為「備註」)")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(false)
+                        .AddChoice("🏷️ 條件", "條件")
+                        .AddChoice("📝 備註", "備註"))
+                    .AddOption("note", ApplicationCommandOptionType.String, "內容 (選填)", isRequired: false).Build(),
 
                 new SlashCommandBuilder().WithName("remove-menu-item")
                     .WithDescription("➖ 移除草稿中的 MENU 品項")
                     .AddOption("item_name", ApplicationCommandOptionType.String, "請輸入要移除的完整品項名稱", isRequired: true).Build(),
-                // 在 new SlashCommandBuilder().WithName("remove-menu-item")... 的下方加入這段：
+
                 new SlashCommandBuilder().WithName("change-menu-item")
                     .WithDescription("🔄 替換草稿中的 MENU 品項 (直接覆寫舊品項以保持原本的排列順序)")
                     .AddOption("old_item_name", ApplicationCommandOptionType.String, "要被替換的原品項【完整名稱】", isRequired: true)
                     .AddOption("new_item_name", ApplicationCommandOptionType.String, "新的品項名稱", isRequired: true)
                     .AddOption("points", ApplicationCommandOptionType.Integer, "新的所需點數 (設為 0 將視為分類標題)", isRequired: true)
-                    .AddOption("note", ApplicationCommandOptionType.String, "新的條件或備註 (選填)", isRequired: false)
+                    // 👇 這裡也同步新增類型選擇
+                    .AddOption(new SlashCommandOptionBuilder()
+                        .WithName("note_type")
+                        .WithDescription("選擇備註的標籤類型 (預設為「備註」)")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(false)
+                        .AddChoice("🏷️ 條件", "條件")
+                        .AddChoice("📝 備註", "備註"))
+                    .AddOption("note", ApplicationCommandOptionType.String, "新的內容 (選填)", isRequired: false)
                     .Build(),
                 new SlashCommandBuilder().WithName("edit-menu")
                     .WithDescription("🛍️ 預覽目前的 MENU 草稿，並申請雙人確認發布").Build(),
@@ -833,6 +849,10 @@ namespace ROCAPointBot
 
                     case "daily-records":
                         {
+                            // 👇 新增這兩行：檢查伺服器是否已設定，並驗證執行者是否具備管理員權限
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先使用 `/setup-roca` 完成基本設定。"); break; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 權限不足，此指令僅限管理員使用。"); return; }
+
                             string dateStr = (string)command.Data.Options.First().Value;
                             if (!DateTime.TryParse(dateStr, out DateTime dt)) { await command.FollowupAsync("❌ 日期格式錯誤。"); break; }
                             var dLogs = await db.PointLogs.Where(l => l.GuildId == gid && l.Timestamp.Date == dt.Date && !l.IsDeleted).ToListAsync();
@@ -909,9 +929,19 @@ namespace ROCAPointBot
 
                             string itemName = (string)command.Data.Options.First(x => x.Name == "item_name").Value;
                             int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
-                            string note = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string;
 
-                            db.RewardMenuItems.Add(new RewardMenuItem { GuildId = gid, ItemName = itemName, Points = points, Note = note });
+                            // 👇 讀取標籤類型與內容
+                            string noteType = command.Data.Options.FirstOrDefault(x => x.Name == "note_type")?.Value as string ?? "備註";
+                            string noteText = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string;
+
+                            // 組合最終字串
+                            string finalNote = null;
+                            if (!string.IsNullOrEmpty(noteText))
+                            {
+                                finalNote = $"{noteType}: {noteText}";
+                            }
+
+                            db.RewardMenuItems.Add(new RewardMenuItem { GuildId = gid, ItemName = itemName, Points = points, Note = finalNote });
                             await db.SaveChangesAsync();
 
                             string msg = points <= 0 ? $"✅ 已新增分類標題：`{itemName}`" : $"✅ 已新增品項：`{itemName}` (點數: {points})";
@@ -942,7 +972,16 @@ namespace ROCAPointBot
                             string oldItemName = (string)command.Data.Options.First(x => x.Name == "old_item_name").Value;
                             string newItemName = (string)command.Data.Options.First(x => x.Name == "new_item_name").Value;
                             int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
-                            string note = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string;
+
+                            // 👇 讀取標籤類型與內容
+                            string noteType = command.Data.Options.FirstOrDefault(x => x.Name == "note_type")?.Value as string ?? "備註";
+                            string noteText = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string;
+
+                            string finalNote = null;
+                            if (!string.IsNullOrEmpty(noteText))
+                            {
+                                finalNote = $"{noteType}: {noteText}";
+                            }
 
                             // 尋找要被替換的舊品項
                             var itemToEdit = await db.RewardMenuItems.FirstOrDefaultAsync(x => x.GuildId == gid && x.ItemName == oldItemName);
@@ -953,10 +992,10 @@ namespace ROCAPointBot
                                 return;
                             }
 
-                            // 覆寫內容，但不改變 Id (這樣就能保留原本的順序)
+                            // 覆寫內容
                             itemToEdit.ItemName = newItemName;
                             itemToEdit.Points = points;
-                            itemToEdit.Note = note;
+                            itemToEdit.Note = finalNote; // 👇 存入包含標籤的內容
 
                             await db.SaveChangesAsync();
 
@@ -1114,6 +1153,7 @@ namespace ROCAPointBot
             }
         }
         // 自動將資料庫的品項清單轉換為精美排版與 ANSI 色塊
+        // 自動將管理員的純文字轉換為精美排版與 ANSI 色塊
         private string FormatMenuItems(List<RewardMenuItem> items)
         {
             if (!items.Any()) return "```ansi\n\u001b[33m目前草稿中尚無任何品項\u001b[0m\n```";
@@ -1123,7 +1163,6 @@ namespace ROCAPointBot
 
             foreach (var item in items)
             {
-                // 💡 巧思：如果點數設定為 0，就視為「分類標題」
                 if (item.Points <= 0)
                 {
                     sb.AppendLine($"\u001b[33m-- {item.ItemName} --\u001b[0m");
@@ -1140,7 +1179,15 @@ namespace ROCAPointBot
 
                     if (!string.IsNullOrEmpty(item.Note))
                     {
-                        formattedLine += $" \u001b[30m| 條件/備註: {item.Note}\u001b[0m";
+                        // 👇 判斷如果字串已經包含了「條件:」或「備註:」，就直接顯示；如果沒有(舊資料)，就加上預設的「條件/備註:」
+                        if (item.Note.StartsWith("條件:") || item.Note.StartsWith("備註:"))
+                        {
+                            formattedLine += $" \u001b[30m| {item.Note}\u001b[0m";
+                        }
+                        else
+                        {
+                            formattedLine += $" \u001b[30m| 條件/備註: {item.Note}\u001b[0m";
+                        }
                     }
                     sb.AppendLine(formattedLine);
                 }
