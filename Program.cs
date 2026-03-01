@@ -1175,7 +1175,7 @@ namespace ROCAPointBot
                             var targetData = await db.UserPoints.Where(u => u.GuildId == targetConfig.GuildId).OrderByDescending(u => u.Points).ToListAsync();
                             if (!targetData.Any()) { await command.FollowupAsync($"📭 目標編號 `{targetCode}` 尚無成員資料。"); break; }
 
-                            var targetSb = new StringBuilder($"## 👁️ 國防部查閱：單位 [{targetCode}] 點數總覽\n```ansi\n");
+                            var targetSb = new StringBuilder($"## 國防部查閱：單位 [{targetCode}] 點數總覽\n```ansi\n");
                             int tRank = 1;
                             foreach (var u in targetData)
                             {
