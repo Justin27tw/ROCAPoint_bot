@@ -276,7 +276,6 @@ namespace ROCAPointBot
                     .WithDescription("➕ 新增兌換 MENU 品項 (僅暫存於草稿，需透過 /edit-menu 發布)")
                     .AddOption("item_name", ApplicationCommandOptionType.String, "品項名稱 (若要新增分類標題，請將點數設為 0)", isRequired: true)
                     .AddOption("points", ApplicationCommandOptionType.Integer, "所需點數 (設為 0 將視為分類標題)", isRequired: true)
-                    // 👇 新增這段：讓管理員選擇標籤類型
                     .AddOption(new SlashCommandOptionBuilder()
                         .WithName("note_type")
                         .WithDescription("選擇備註的標籤類型 (預設為「備註」)")
@@ -284,8 +283,10 @@ namespace ROCAPointBot
                         .WithRequired(false)
                         .AddChoice("🏷️ 條件", "條件")
                         .AddChoice("📝 備註", "備註"))
-                    .AddOption("note", ApplicationCommandOptionType.String, "內容 (選填)", isRequired: false).Build(),
-
+                    .AddOption("note", ApplicationCommandOptionType.String, "內容 (選填)", isRequired: false)
+                    // 👇 加上這一行：讓管理員可以選填「要插在哪個品項後面」
+                    .AddOption("insert_after", ApplicationCommandOptionType.String, "要插在哪個品項的【下方】？請輸入該品項完整名稱(選填)", isRequired: false)
+                    .Build(),
                 new SlashCommandBuilder().WithName("remove-menu-item")
                     .WithDescription("➖ 移除草稿中的 MENU 品項")
                     .AddOption("item_name", ApplicationCommandOptionType.String, "請輸入要移除的完整品項名稱", isRequired: true).Build(),
@@ -930,22 +931,72 @@ namespace ROCAPointBot
                             string itemName = (string)command.Data.Options.First(x => x.Name == "item_name").Value;
                             int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
 
-                            // 👇 讀取標籤類型與內容
                             string noteType = command.Data.Options.FirstOrDefault(x => x.Name == "note_type")?.Value as string ?? "備註";
                             string noteText = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string;
 
-                            // 組合最終字串
+                            // 👇 讀取使用者輸入的插隊目標
+                            string insertAfter = command.Data.Options.FirstOrDefault(x => x.Name == "insert_after")?.Value as string;
+
                             string finalNote = null;
                             if (!string.IsNullOrEmpty(noteText))
                             {
                                 finalNote = $"{noteType}: {noteText}";
                             }
 
-                            db.RewardMenuItems.Add(new RewardMenuItem { GuildId = gid, ItemName = itemName, Points = points, Note = finalNote });
-                            await db.SaveChangesAsync();
+                            // 如果沒有指定插隊，就按照原本的方式新增到最後面
+                            if (string.IsNullOrEmpty(insertAfter))
+                            {
+                                db.RewardMenuItems.Add(new RewardMenuItem { GuildId = gid, ItemName = itemName, Points = points, Note = finalNote });
+                                await db.SaveChangesAsync();
 
-                            string msg = points <= 0 ? $"✅ 已新增分類標題：`{itemName}`" : $"✅ 已新增品項：`{itemName}` (點數: {points})";
-                            await command.FollowupAsync($"{msg}\n> 此更動目前僅存在於草稿中。請使用 `/edit-menu` 預覽並申請發布。");
+                                string msg = points <= 0 ? $"✅ 已新增分類標題：`{itemName}`" : $"✅ 已新增品項：`{itemName}` (點數: {points})";
+                                await command.FollowupAsync($"{msg}\n> 此更動目前僅存在於草稿中。請使用 `/edit-menu` 預覽並申請發布。");
+                            }
+                            else
+                            {
+                                // 有指定插隊目標
+                                var existingItems = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
+                                var targetItem = existingItems.FirstOrDefault(x => x.ItemName == insertAfter);
+
+                                if (targetItem == null)
+                                {
+                                    await command.FollowupAsync($"❌ 草稿中找不到名稱為 `{insertAfter}` 的品項。請確認輸入的名稱是否完全相符。");
+                                    return;
+                                }
+
+                                // 先將新品項加到資料庫取得 ID
+                                var newItem = new RewardMenuItem { GuildId = gid, ItemName = itemName, Points = points, Note = finalNote };
+                                db.RewardMenuItems.Add(newItem);
+                                await db.SaveChangesAsync(); // 儲存後 newItem 會獲得最新的 Id，暫時排在最後面
+
+                                // 重新抓取包含新品項的完整清單 (依 Id 排序)
+                                existingItems = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
+
+                                // 建立我們「期望的排序資料」快照 (使用 Tuple 避免物件參考覆蓋的問題)
+                                var desiredData = new List<(string Name, int Points, string Note)>();
+                                foreach (var item in existingItems.Where(i => i.Id != newItem.Id))
+                                {
+                                    desiredData.Add((item.ItemName, item.Points, item.Note));
+                                    // 找到目標品項後，緊接著把新品項塞進期望的清單中
+                                    if (item.ItemName == insertAfter)
+                                    {
+                                        desiredData.Add((newItem.ItemName, newItem.Points, newItem.Note));
+                                    }
+                                }
+
+                                // 將現有資料庫列的內容，依序替換成期望的內容 (完美實現平移插隊)
+                                for (int i = 0; i < existingItems.Count; i++)
+                                {
+                                    existingItems[i].ItemName = desiredData[i].Name;
+                                    existingItems[i].Points = desiredData[i].Points;
+                                    existingItems[i].Note = desiredData[i].Note;
+                                }
+
+                                await db.SaveChangesAsync();
+
+                                string msg = points <= 0 ? $"✅ 已成功將分類標題 `{itemName}` 安插在 `{insertAfter}` 之後！" : $"✅ 已成功將品項 `{itemName}` (點數: {points}) 安插在 `{insertAfter}` 之後！";
+                                await command.FollowupAsync($"{msg}\n> 此更動目前僅存在於草稿中。請使用 `/edit-menu` 預覽並發布。");
+                            }
                             break;
                         }
 
