@@ -1507,17 +1507,57 @@ namespace ROCAPointBot
                     var items = await db.RewardMenuItems.Where(x => x.GuildId == gid).OrderBy(x => x.Id).ToListAsync();
                     string finalFormattedMenu = FormatMenuItems(items);
 
+                    string diffText = "```text\n(無法比對變動)\n```";
+
                     if (botConfig != null)
                     {
+                        // 1. 取得舊版與新版的純文字 (利用正則表達式過濾掉 ANSI 色碼與 ``` 標籤)
+                        string oldMenu = botConfig.RewardMenuContent ?? "";
+                        var oldLines = oldMenu.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                              .Where(l => !l.Contains("```"))
+                                              .Select(l => System.Text.RegularExpressions.Regex.Replace(l, @"\x1B\[[^m]*m", "").Trim())
+                                              .Where(l => !string.IsNullOrEmpty(l))
+                                              .ToList();
+
+                        var newLines = finalFormattedMenu.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                              .Where(l => !l.Contains("```"))
+                                              .Select(l => System.Text.RegularExpressions.Regex.Replace(l, @"\x1B\[[^m]*m", "").Trim())
+                                              .Where(l => !string.IsNullOrEmpty(l))
+                                              .ToList();
+
+                        // 2. 進行差異比對 (抓出新增與移除的項目)
+                        var added = newLines.Except(oldLines).ToList();
+                        var removed = oldLines.Except(newLines).ToList();
+
+                        if (added.Any() || removed.Any())
+                        {
+                            var sbDiff = new StringBuilder();
+                            sbDiff.AppendLine("```diff");
+                            foreach (var r in removed) sbDiff.AppendLine($"- {r}");
+                            foreach (var a in added) sbDiff.AppendLine($"+ {a}");
+                            sbDiff.AppendLine("```");
+                            diffText = sbDiff.ToString();
+                        }
+                        else
+                        {
+                            diffText = "```text\n(無實質項目變動，僅重新發布排版)\n```";
+                        }
+
+                        // 3. 儲存新資料
                         botConfig.RewardMenuContent = finalFormattedMenu;
                         botConfig.RewardMenuUpdateTime = Program.GetTaipeiTime();
                         await db.SaveChangesAsync();
                     }
-                    string timeStr = botConfig.RewardMenuUpdateTime.Value.ToString("yyyy年MM月dd日HH:mm");
+
+                    string timeStr = botConfig?.RewardMenuUpdateTime?.ToString("yyyy年MM月dd日HH:mm") ?? Program.GetTaipeiTime().ToString("yyyy年MM月dd日HH:mm");
                     await component.UpdateAsync(m => { m.Content = $"✅ **發布成功！** 線上 MENU 已更新。"; m.Components = null; });
+
+                    // 原頻道內的公告維持原樣發布完整的彩色 MENU
                     string publicMsg = $"✅ **MENU 已成功更新發布！**\n> 執行者：{executor.Mention}\n\n{finalFormattedMenu}\n\n> *此為 {timeStr} 公告*";
                     await component.Channel.SendMessageAsync(publicMsg);
-                    _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【MENU 更新公告】**\n> 執行者：{executor.Mention}\n> 新版 MENU 已生效，請大家可使用 `/menu` 查看最新品項。", true);
+
+                    // 🚨 修改重點：這裡的 true 改為 false (不 Ping 管理員)，並且改用 Username 避免 Ping 到執行者，最後附上剛剛比對出來的 diffText 變動區塊
+                    _ = BroadcastToAdminChannelsAsync(gid, $"📜 **【MENU 更新公告】**\n> 執行者：**{executor.Username}**\n> 此次 MENU 變動內容如下：\n{diffText}\n> *(大家可使用 `/menu` 查看完整最新品項)*", false);
                     return;
                 }
 
