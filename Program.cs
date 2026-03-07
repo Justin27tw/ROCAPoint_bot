@@ -842,7 +842,6 @@ namespace ROCAPointBot
                                 await command.FollowupAsync($"📭 {targetUser.Mention} 在 <#{classResultChannelId}> 頻道中，找不到結訓通過紀錄。\n> *(提示：機器人目前最多往前回溯 2000 筆紀錄，若是較久以前的紀錄可能需要重新補登)*");
                                 return;
                             }
-
                             // 7. 換算台北時間並計算天數
                             DateTime msgTimeUtc = foundMessage.Timestamp.UtcDateTime;
                             DateTime msgTimeTaipei = TimeZoneInfo.ConvertTimeFromUtc(msgTimeUtc, TimeZoneInfo.FindSystemTimeZoneById("Taipei Standard Time"));
@@ -851,18 +850,22 @@ namespace ROCAPointBot
                             // 用 Date 屬性相減，確保是計算「日曆天數」的差距
                             int days = (int)(nowTaipei.Date - msgTimeTaipei.Date).TotalDays;
 
-                            // 根據查詢對象，動態切換稱呼文案
-                            string pronoun = targetUser.Id == command.User.Id ? "您" : "該員";
-
-                            // 👇 取得打指令者 (執行者) 的名稱
+                            // 👇 取得打指令者 (執行者) 的名稱，並過濾掉 Roblox 綴詞
                             var executorUser = (SocketGuildUser)command.User;
                             string executorName = executorUser.Nickname ?? executorUser.Username;
+                            if (executorName.Contains("]"))
+                                executorName = executorName.Substring(executorName.LastIndexOf(']') + 1).Trim();
 
-                            // 如果你想把他的 Roblox 綴詞去掉，可以加上這行 (選用)：
-                            // if (executorName.Contains("]")) executorName = executorName.Substring(executorName.LastIndexOf(']') + 1).Trim();
+                            // 👇 判斷是否為查詢自己，動態切換稱呼與標題
+                            bool isSelf = targetUser.Id == command.User.Id;
+                            string pronoun = isSelf ? "您" : "該員";
 
-                            // 👇 修改這裡：加上了 executorName
-                            await command.FollowupAsync($" **{executorName}** 發起的服役天數查詢：**{targetName}**\n> 自 **{msgTimeTaipei:yyyy年MM月dd日}** 結訓通過起算\n> {pronoun}在部門已經服役了 **{days}** 天！\n");
+                            string titleMsg = isSelf
+                                ? $" **服役天數查詢：{targetName}**"
+                                : $" **{executorName}** 替 **{targetName}** 查詢的服役天數：";
+
+                            // 👇 發送最終的隱藏訊息 (FollowupAsync)
+                            await command.FollowupAsync($"{titleMsg}\n> 自 **{msgTimeTaipei:yyyy年MM月dd日}** 結訓通過起算\n> {pronoun}在部門已經服役了 **{days}** 天！\n");
                             break;
                         }
                     case "status":
