@@ -313,10 +313,12 @@ namespace ROCAPointBot
                 // 在 var commands = new List<ApplicationCommandProperties> 中新增：
                 new SlashCommandBuilder().WithName("my-info").WithDescription("👤 查詢自己的點數與近期十筆紀錄").Build(),
                 new SlashCommandBuilder().WithName("group-info").WithDescription("👥 查詢已綁定 Roblox 群組中符合資格的總人數").Build(),
+                // 👇 替換成下面這段：
                 new SlashCommandBuilder()
-                .WithName("service-days")
-                .WithDescription("📅 查詢你在憲兵部門的服役天數")
-                .Build(),
+                    .WithName("service-days")
+                    .WithDescription("📅 查詢你或他人在憲兵部門的服役天數")
+                    .AddOption("user", ApplicationCommandOptionType.User, "想查詢的對象 (若不填寫則預設查詢自己)", isRequired: false)
+                    .Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -765,29 +767,33 @@ namespace ROCAPointBot
                         }
                     case "service-days":
                         {
-                            // 👇 1. 新增這段防護機制：檢查該伺服器是否綁定了憲兵群組 (ID: 13549943)
+                            // 1. 檢查該伺服器是否綁定了憲兵群組 (ID: 13549943)
                             if (botConfig == null || botConfig.RobloxGroupId != "13549943")
                             {
                                 await command.FollowupAsync("❌ **權限拒絕：** 此為 **憲兵部門** 的專屬功能！本伺服器尚未綁定憲兵群組，無法使用。");
                                 return;
                             }
 
-                            var targetUser = (SocketGuildUser)command.User;
+                            // 👇 2. 判斷是否有選擇特定使用者，若沒有則預設為「執行指令的人」
+                            var targetUserOption = command.Data.Options.FirstOrDefault(x => x.Name == "user");
+                            SocketGuildUser targetUser = targetUserOption != null ? (SocketGuildUser)targetUserOption.Value : (SocketGuildUser)command.User;
+
                             string targetName = targetUser.Nickname ?? targetUser.Username;
 
-                            // 2. 自動辨識並擷取後方的 Roblox Name
+                            // 3. 自動辨識並擷取後方的 Roblox Name
                             if (targetName.Contains("]"))
                                 targetName = targetName.Substring(targetName.LastIndexOf(']') + 1).Trim();
 
-                            // 3. 驗證該名單是否在資料庫 (即是否為 Roblox 群組成員)
+                            // 4. 驗證該名單是否在資料庫
                             var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == targetName.ToLower());
                             if (userPoint == null)
                             {
-                                await command.FollowupAsync($"❌ 找不到玩家 `{targetName}` 的資料，請確認您目前是否在綁定的 Roblox 群組名單內。");
+                                string errMsg = targetUserOption != null ? $"❌ 找不到玩家 `{targetName}` 的資料，請確認該員是否在綁定的 Roblox 群組名單內。" : $"❌ 找不到您的資料，請確認您是否在綁定的 Roblox 群組名單內。";
+                                await command.FollowupAsync(errMsg);
                                 return;
                             }
 
-                            // 4. 取得指定的「🧾課程結果-class-result」頻道
+                            // 5. 取得指定的「🧾課程結果-class-result」頻道
                             ulong classResultChannelId = 1325441624704286760;
                             var channel = _client.GetChannel(classResultChannelId) as ITextChannel;
                             if (channel == null)
@@ -796,11 +802,11 @@ namespace ROCAPointBot
                                 return;
                             }
 
-                            await command.FollowupAsync("⏳ 正在翻閱結訓紀錄檔案，這可能需要幾秒鐘的時間...");
+                            await command.FollowupAsync($"⏳ 正在翻閱 `{targetName}` 的結訓紀錄檔案，這可能需要幾秒鐘的時間...");
 
                             IMessage foundMessage = null;
 
-                            // 5. 往前翻找歷史訊息 (設定最多往回找 2000 筆以保護效能)
+                            // 6. 往前翻找歷史訊息 (設定最多往回找 2000 筆以保護效能)
                             await foreach (var batch in channel.GetMessagesAsync(2000))
                             {
                                 foreach (var msg in batch)
@@ -808,7 +814,7 @@ namespace ROCAPointBot
                                     // 檢查訊息內是否包含「通過」以及該使用者的 ID 或 Roblox Name
                                     if (msg.Content.Contains("通過") && (msg.Content.Contains(targetUser.Id.ToString()) || msg.Content.Contains(targetName)))
                                     {
-                                        // 為了避免他在「不通過」被 Ping 到，我們逐行嚴格檢查
+                                        // 為了避免在「不通過」被 Ping 到，逐行嚴格檢查
                                         var lines = msg.Content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
                                         bool isPassed = false;
                                         foreach (var line in lines)
@@ -832,11 +838,12 @@ namespace ROCAPointBot
 
                             if (foundMessage == null)
                             {
-                                await command.Channel.SendMessageAsync($"📭 {targetUser.Mention} 在 <#{classResultChannelId}> 頻道中，找不到您的結訓通過紀錄。\n> *(提示：機器人目前最多往前回溯 2000 筆紀錄，若您是很久之前結訓的，可能需要請教官重新補登)*");
+                                // 👇 修改這裡：把 command.Channel.SendMessageAsync 改成 command.FollowupAsync
+                                await command.FollowupAsync($"📭 {targetUser.Mention} 在 <#{classResultChannelId}> 頻道中，找不到結訓通過紀錄。\n> *(提示：機器人目前最多往前回溯 2000 筆紀錄，若是較久以前的紀錄可能需要重新補登)*");
                                 return;
                             }
 
-                            // 6. 換算台北時間並計算天數
+                            // 7. 換算台北時間並計算天數
                             DateTime msgTimeUtc = foundMessage.Timestamp.UtcDateTime;
                             DateTime msgTimeTaipei = TimeZoneInfo.ConvertTimeFromUtc(msgTimeUtc, TimeZoneInfo.FindSystemTimeZoneById("Taipei Standard Time"));
                             DateTime nowTaipei = Program.GetTaipeiTime();
@@ -844,7 +851,18 @@ namespace ROCAPointBot
                             // 用 Date 屬性相減，確保是計算「日曆天數」的差距
                             int days = (int)(nowTaipei.Date - msgTimeTaipei.Date).TotalDays;
 
-                            await command.Channel.SendMessageAsync($" **服役天數查詢：{targetName}**\n> 自 **{msgTimeTaipei:yyyy年MM月dd日}** 結訓通過起算\n> 您在部門已經服役了 **{days}** 天");
+                            // 根據查詢對象，動態切換稱呼文案
+                            string pronoun = targetUser.Id == command.User.Id ? "您" : "該員";
+
+                            // 👇 取得打指令者 (執行者) 的名稱
+                            var executorUser = (SocketGuildUser)command.User;
+                            string executorName = executorUser.Nickname ?? executorUser.Username;
+
+                            // 如果你想把他的 Roblox 綴詞去掉，可以加上這行 (選用)：
+                            // if (executorName.Contains("]")) executorName = executorName.Substring(executorName.LastIndexOf(']') + 1).Trim();
+
+                            // 👇 修改這裡：加上了 executorName
+                            await command.FollowupAsync($" **{executorName}** 發起的服役天數查詢：**{targetName}**\n> 自 **{msgTimeTaipei:yyyy年MM月dd日}** 結訓通過起算\n> {pronoun}在部門已經服役了 **{days}** 天！\n");
                             break;
                         }
                     case "status":
