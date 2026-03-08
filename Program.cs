@@ -152,6 +152,9 @@ namespace ROCAPointBot
                     // 為了相容 SQLite 的備用語法
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD RewardMenuContent TEXT NULL"); } catch { }
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD RewardMenuUpdateTime DATETIME NULL"); } catch { }
+                    // 👇 新增這兩行：自動為現有資料庫加入職位欄位
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE UserPoints ADD RobloxRank NVARCHAR(MAX) NULL"); } catch { }
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE UserPoints ADD RobloxRank TEXT NULL"); } catch { }
                     // 自動建立草稿品項資料表
                     try
                     {
@@ -1760,8 +1763,9 @@ namespace ROCAPointBot
             int addedCount = 0;
             int removedCount = 0;
 
-            var existingUsers = await db.UserPoints.Where(u => u.GuildId == guildId).Select(u => u.RobloxUsername.ToLower()).ToListAsync();
-            var existingSet = new HashSet<string>(existingUsers);
+            // 改用 Dictionary 以便快速讀取與更新現有使用者的職位
+            var existingDbUsers = await db.UserPoints.Where(u => u.GuildId == guildId).ToListAsync();
+            var existingDict = existingDbUsers.ToDictionary(u => u.RobloxUsername.ToLower());
             var validActiveUsers = new HashSet<string>();
 
             while (hasMore)
@@ -1773,7 +1777,7 @@ namespace ROCAPointBot
                 if (!res.IsSuccessStatusCode)
                 {
                     Console.WriteLine("⚠️ Roblox API 請求失敗或已達限制，中斷同步以保護資料庫。");
-                    return (addedCount, removedCount); // 💡 修改為回傳兩個值
+                    return (addedCount, removedCount);
                 }
 
                 var json = await res.Content.ReadAsStringAsync();
@@ -1784,16 +1788,36 @@ namespace ROCAPointBot
                 foreach (var item in data.EnumerateArray())
                 {
                     string username = item.GetProperty("user").GetProperty("username").GetString();
-                    int rank = item.GetProperty("role").GetProperty("rank").GetInt32();
+                    var roleProp = item.GetProperty("role"); // 取得 role 物件
+                    int rank = roleProp.GetProperty("rank").GetInt32();
+                    string roleName = roleProp.GetProperty("name").GetString(); // 取得原始職位名稱
 
                     if (rank <= maxRank && rank >= minRank)
                     {
                         validActiveUsers.Add(username.ToLower());
 
-                        if (!existingSet.Contains(username.ToLower()))
+                        // 🔍 自動擷取 [ ] 內的文字 (例如：[大隊長-勤務支援中隊])
+                        string parsedRank = roleName;
+                        if (!string.IsNullOrEmpty(roleName) && roleName.Contains("[") && roleName.Contains("]"))
                         {
-                            db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0 });
-                            existingSet.Add(username.ToLower());
+                            int start = roleName.IndexOf('[');
+                            int end = roleName.IndexOf(']', start);
+                            if (start != -1 && end != -1)
+                            {
+                                parsedRank = roleName.Substring(start, end - start + 1);
+                            }
+                        }
+
+                        // 如果玩家已經在資料庫，檢查並更新他的職位
+                        if (existingDict.TryGetValue(username.ToLower(), out var existingUser))
+                        {
+                            if (existingUser.RobloxRank != parsedRank) existingUser.RobloxRank = parsedRank;
+                        }
+                        else
+                        {
+                            // 如果不在資料庫，就新增並填入職位
+                            db.UserPoints.Add(new UserPoint { GuildId = guildId, RobloxUsername = username, Points = 0, RobloxRank = parsedRank });
+                            existingDict[username.ToLower()] = new UserPoint { RobloxRank = parsedRank }; // 避免同頁面重複新增
                             addedCount++;
                         }
                     }
@@ -2002,15 +2026,15 @@ namespace ROCAPointBot
                 // 準備要寫入 Google 試算表的資料結構 (3個欄位)
                 var valueRange = new ValueRange();
                 var oblist = new List<IList<object>>()
-        {
-            new List<object>() { "人員名稱", "目前點數", "最後變動時間" } // 自訂表頭
-        };
+                {
+                    new List<object>() { "職位", "人員名稱", "目前點數", "最後變動時間" } // 👈 加入職位表頭
+                };
 
                 string updateTime = Program.GetTaipeiTime().ToString("yyyy-MM-dd HH:mm:ss");
                 foreach (var u in users)
                 {
-                    // 寫入三欄資料：名稱、點數、時間
-                    oblist.Add(new List<object>() { u.RobloxUsername, u.Points, updateTime });
+                    // 寫入四欄資料：職位 (若空則顯示未知)、名稱、點數、時間
+                    oblist.Add(new List<object>() { u.RobloxRank ?? "尚未同步", u.RobloxUsername, u.Points, updateTime });
                 }
                 valueRange.Values = oblist;
 
@@ -2030,9 +2054,8 @@ namespace ROCAPointBot
                 // 🟢 動作 1：更新該單位的「專屬試算表」
                 if (!string.IsNullOrEmpty(individualSheetId))
                 {
-                    // 先清空 A 到 C 欄
-                    await service.Spreadsheets.Values.Clear(new ClearValuesRequest(), individualSheetId, "A:C").ExecuteAsync();
-                    // 寫入新資料
+                    // 改為清空 A 到 D 欄
+                    await service.Spreadsheets.Values.Clear(new ClearValuesRequest(), individualSheetId, "A:D").ExecuteAsync();
                     var updateRequest = service.Spreadsheets.Values.Update(valueRange, individualSheetId, "A1");
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
                     await updateRequest.ExecuteAsync();
@@ -2041,8 +2064,8 @@ namespace ROCAPointBot
                 // 🟢 動作 2：同步更新「三單位總覽試算表」的對應分頁
                 if (!string.IsNullOrEmpty(tabName))
                 {
-                    // 指定範圍加上分頁名稱，例如 "裝甲!A:C"
-                    string range = $"{tabName}!A:C";
+                    // 指定範圍改為 A:D
+                    string range = $"{tabName}!A:D";
                     await service.Spreadsheets.Values.Clear(new ClearValuesRequest(), combinedSheetId, range).ExecuteAsync();
 
                     var updateCombinedReq = service.Spreadsheets.Values.Update(valueRange, combinedSheetId, $"{tabName}!A1");
@@ -2079,7 +2102,7 @@ namespace ROCAPointBot
         }
     }
 
-    public class UserPoint { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public int Points { get; set; } }
+    public class UserPoint { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public int Points { get; set; } public string? RobloxRank { get; set; } }
 
     public class PointLog { [Key] public int Id { get; set; } public ulong GuildId { get; set; } public string RobloxUsername { get; set; } public string AdminName { get; set; } public int PointsAdded { get; set; } public string Reason { get; set; } public DateTime Timestamp { get; set; } public bool IsDeleted { get; set; } }
     // 👇 新增這行：加入 Admin 頻道設定表
