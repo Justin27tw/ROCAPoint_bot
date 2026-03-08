@@ -334,6 +334,8 @@ namespace ROCAPointBot
                 new SlashCommandBuilder().WithName("end-event")
                     .WithDescription("⏹️ 結束活動並開啟結算面板 (自動過濾待滿5分鐘人員)")
                     .AddOption("points", ApplicationCommandOptionType.Integer, "預定發放點數", isRequired: true)
+                    // 👇 新增這行：讓長官結算時可以選填備註
+                    .AddOption("note", ApplicationCommandOptionType.String, "結算備註 (選填，會附加在活動名稱後方)", isRequired: false)
                     .Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
@@ -431,8 +433,11 @@ namespace ROCAPointBot
                             // 把當下已經在頻道內的人先加進去，當作 0 秒起算
                             foreach (var u in exec.VoiceChannel.Users)
                             {
+                                if (u.IsBot) continue; // 👈 排除機器人
+                                string dName = u.Nickname ?? u.GlobalName ?? u.Username; // 👈 優先抓取伺服器暱稱
+
                                 newEvt.Participants[u.Id] = new VoiceParticipant { LastJoinTime = Program.GetTaipeiTime() };
-                                newEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {u.Username} (原先已在頻道內)");
+                                newEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {dName} (原先已在頻道內)");
                             }
 
                             _activeEvents[vcId] = newEvt;
@@ -456,6 +461,18 @@ namespace ROCAPointBot
                             }
 
                             int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
+
+                            // 👇 讀取長官填寫的備註 (如果有填的話)
+                            var noteOption = command.Data.Options.FirstOrDefault(x => x.Name == "note");
+                            string noteStr = noteOption != null ? (string)noteOption.Value : string.Empty;
+
+                            // 👇 將原活動原因與備註組合在一起
+                            string finalReason = evt.Reason;
+                            if (!string.IsNullOrEmpty(noteStr))
+                            {
+                                finalReason += $" (備註：{noteStr})";
+                            }
+
                             var now = Program.GetTaipeiTime();
 
                             // 結算所有人的最終停留時間
@@ -476,12 +493,12 @@ namespace ROCAPointBot
                             {
                                 GuildId = gid,
                                 Points = points,
-                                Reason = evt.Reason,
+                                Reason = finalReason, // 👈 換成包含備註的完整原因
                                 AdminId = exec.Id,
                                 FinalUserIds = qualifiedIds,
                                 ActionLogs = evt.ActionLogs,
-                                StartTime = evt.StartTime, // 👈 帶入開始時間
-                                EndTime = now              // 👈 帶入剛剛取得的結束時間
+                                StartTime = evt.StartTime,
+                                EndTime = now
                             };
 
                             _activeEvents.Remove(vcId); // 停止追蹤此頻道
@@ -1893,7 +1910,8 @@ namespace ROCAPointBot
                     foreach (var uid in pending.FinalUserIds)
                     {
                         var targetUser = executor.Guild.GetUser(uid);
-                        if (targetUser == null) continue;
+                        // 👇 雙重保險：如果有人手動把機器人加進名單，這裡直接過濾掉
+                        if (targetUser == null || targetUser.IsBot) continue;
 
                         string name = targetUser.Nickname ?? targetUser.Username;
                         if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
@@ -2137,8 +2155,14 @@ namespace ROCAPointBot
             return user.Roles.Any(r => r.Id == config.AdminRoleId);
         }
         // 👇 新增這段：負責計算進出入時間與紀錄文字日誌
+        // 👇 負責計算進出入時間與紀錄文字日誌 (已修正顯示名稱與防 Bot)
         private Task HandleVoiceStateUpdatedAsync(SocketUser user, SocketVoiceState oldState, SocketVoiceState newState)
         {
+            if (user.IsBot) return Task.CompletedTask; // 👈 排除所有機器人進出紀錄
+
+            // 優先抓取伺服器內設定的暱稱
+            string dName = (user as SocketGuildUser)?.Nickname ?? user.GlobalName ?? user.Username;
+
             // 情況 A：離開了原本的語音頻道
             if (oldState.VoiceChannel != null && _activeEvents.TryGetValue(oldState.VoiceChannel.Id, out var leftEvt))
             {
@@ -2146,7 +2170,7 @@ namespace ROCAPointBot
                 {
                     p.TotalSeconds += (Program.GetTaipeiTime() - p.LastJoinTime.Value).TotalSeconds;
                     p.LastJoinTime = null; // 標記為不在頻道內
-                    leftEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🔴 {user.Username} 離開了語音");
+                    leftEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🔴 {dName} 離開了語音");
                 }
             }
             // 情況 B：加入了正在追蹤的頻道
@@ -2156,7 +2180,7 @@ namespace ROCAPointBot
                     joinEvt.Participants[user.Id] = new VoiceParticipant();
 
                 joinEvt.Participants[user.Id].LastJoinTime = Program.GetTaipeiTime();
-                joinEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {user.Username} 加入了語音");
+                joinEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {dName} 加入了語音");
             }
             return Task.CompletedTask;
         }
