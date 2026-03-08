@@ -53,7 +53,9 @@ namespace ROCAPointBot
         // 👇 新增：你的開發者 ID 與私訊頻道 ID
         private readonly ulong _developerId = 1018018187318673471;
         private readonly ulong _devDmChannelId = 1476489806946242592;
-
+        // 👇 新增這兩個靜態變數，用來暫存追蹤中的語音頻道與結算面板
+        private static Dictionary<ulong, VoiceEventSession> _activeEvents = new();
+        private static Dictionary<string, PendingEventDistribution> _pendingDistributions = new();
         public DiscordBotService(IConfiguration config)
         {
             _configuration = config;
@@ -106,6 +108,8 @@ namespace ROCAPointBot
             };
             _client.SlashCommandExecuted += HandleSlashCommandAsync;
             _client.InteractionCreated += HandleInteractionAsync;
+            // 👇 新增這行：註冊語音頻道進出監聽器
+            _client.UserVoiceStateUpdated += HandleVoiceStateUpdatedAsync;
             await _client.LoginAsync(TokenType.Bot, _discordToken);
             await _client.StartAsync();
             // 👇 2. 新增這段：防休眠自動呼叫 (Keep-Alive) 機制
@@ -322,6 +326,15 @@ namespace ROCAPointBot
                     .WithDescription("📅 查詢你或他人在憲兵部門的服役天數")
                     .AddOption("user", ApplicationCommandOptionType.User, "想查詢的對象 (若不填寫則預設查詢自己)", isRequired: false)
                     .Build(),
+                // 👇 新增這兩個指令
+                new SlashCommandBuilder().WithName("start-event")
+                    .WithDescription("🎤 開始紀錄目前所在語音頻道的活動參與時間")
+                    .AddOption("reason", ApplicationCommandOptionType.String, "活動名稱或發點原因", isRequired: true)
+                    .Build(),
+                new SlashCommandBuilder().WithName("end-event")
+                    .WithDescription("⏹️ 結束活動並開啟結算面板 (自動過濾待滿5分鐘人員)")
+                    .AddOption("points", ApplicationCommandOptionType.Integer, "預定發放點數", isRequired: true)
+                    .Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -334,7 +347,7 @@ namespace ROCAPointBot
             try
             {
                 // 將原本的 bool isEphemeral = ... 替換為以下這行 (在最後面加上了 change-menu-item)：
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info" || command.Data.Name == "change-menu-item" || command.Data.Name == "service-days";
+                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info" || command.Data.Name == "change-menu-item" || command.Data.Name == "service-days" || command.Data.Name == "start-event" || command.Data.Name == "end-event";
                 // 2. 全部統一 Defer (把原本的 if 判斷直接刪除，改成這行)
                 await command.DeferAsync(ephemeral: isEphemeral);
 
@@ -392,7 +405,89 @@ namespace ROCAPointBot
                             await command.Channel.SendMessageAsync($"🔄 群組名單同步完成！\n> 🟢 新增了 **{syncResult.added}** 位新成員 (預設為 0 點)\n> 🔴 移除了 **{syncResult.removed}** 位已退群或不符資格成員。");
                             break;
                         }
+                    case "start-event":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                            var exec = (SocketGuildUser)command.User;
+                            if (!IsAdmin(exec, botConfig) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
 
+                            if (exec.VoiceChannel == null)
+                            {
+                                await command.FollowupAsync("❌ 您必須先進入一個「語音頻道」，才能對該頻道開始紀錄！");
+                                return;
+                            }
+
+                            ulong vcId = exec.VoiceChannel.Id;
+                            if (_activeEvents.ContainsKey(vcId))
+                            {
+                                await command.FollowupAsync($"❌ 頻道 <#{vcId}> 已經在紀錄中了！請先使用 `/end-event` 結束它。");
+                                return;
+                            }
+
+                            string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
+
+                            var newEvt = new VoiceEventSession { GuildId = gid, ChannelId = vcId, AdminId = exec.Id, Reason = reason, StartTime = Program.GetTaipeiTime() };
+
+                            // 把當下已經在頻道內的人先加進去，當作 0 秒起算
+                            foreach (var u in exec.VoiceChannel.Users)
+                            {
+                                newEvt.Participants[u.Id] = new VoiceParticipant { LastJoinTime = Program.GetTaipeiTime() };
+                                newEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {u.Username} (原先已在頻道內)");
+                            }
+
+                            _activeEvents[vcId] = newEvt;
+                            await command.FollowupAsync($"🎤 **活動開始紀錄！**\n> 📍 **頻道：** <#{vcId}>\n> 📝 **原因：** {reason}\n> ⏱️ **時間：** {newEvt.StartTime:HH:mm:ss}\n> *(機器人將自動統計進出時間，請於活動結束時在此輸入 `/end-event`)*");
+                            break;
+                        }
+
+                    case "end-event":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
+                            var exec = (SocketGuildUser)command.User;
+                            if (!IsAdmin(exec, botConfig) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
+
+                            if (exec.VoiceChannel == null) { await command.FollowupAsync("❌ 您必須待在要結束紀錄的「語音頻道」內！"); return; }
+
+                            ulong vcId = exec.VoiceChannel.Id;
+                            if (!_activeEvents.TryGetValue(vcId, out var evt))
+                            {
+                                await command.FollowupAsync($"❌ 頻道 <#{vcId}> 目前沒有正在紀錄的活動。");
+                                return;
+                            }
+
+                            int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
+                            var now = Program.GetTaipeiTime();
+
+                            // 結算所有人的最終停留時間
+                            foreach (var kvp in evt.Participants)
+                            {
+                                if (kvp.Value.LastJoinTime.HasValue)
+                                {
+                                    kvp.Value.TotalSeconds += (now - kvp.Value.LastJoinTime.Value).TotalSeconds;
+                                    kvp.Value.LastJoinTime = null;
+                                }
+                            }
+
+                            // 🏆 篩選出大於等於 5 分鐘 (300 秒) 的人
+                            var qualifiedIds = evt.Participants.Where(x => x.Value.TotalSeconds >= 300).Select(x => x.Key).ToHashSet();
+
+                            string sessId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                            _pendingDistributions[sessId] = new PendingEventDistribution
+                            {
+                                GuildId = gid,
+                                Points = points,
+                                Reason = evt.Reason,
+                                AdminId = exec.Id,
+                                FinalUserIds = qualifiedIds,
+                                ActionLogs = evt.ActionLogs,
+                                StartTime = evt.StartTime, // 👈 帶入開始時間
+                                EndTime = now              // 👈 帶入剛剛取得的結束時間
+                            };
+
+                            _activeEvents.Remove(vcId); // 停止追蹤此頻道
+                            await UpdateEventDashboardAsync(command, sessId, guildChannel.Guild, isFirst: true);
+                            break;
+                        }
                     case "sync-members":
                         {
                             if (botConfig == null) { await command.FollowupAsync("❌ 請先使用 `/setup-roca` 綁定群組。"); return; }
@@ -1315,6 +1410,43 @@ namespace ROCAPointBot
                 else await command.RespondAsync(errMsg, ephemeral: true);
             }
         }
+        // 👇 生成與更新結算面板 UI
+        private async Task UpdateEventDashboardAsync(IDiscordInteraction interaction, string sessId, SocketGuild guild, bool isFirst = false)
+        {
+            if (!_pendingDistributions.TryGetValue(sessId, out var pending)) return;
+
+            // 👇 計算總時長
+            var duration = pending.EndTime - pending.StartTime;
+            string durationStr = $"{(int)duration.TotalHours} 小時 {duration.Minutes} 分鐘 {duration.Seconds} 秒";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"## 📊 語音活動結算面板 (審核中)");
+            sb.AppendLine($"> **發放原因：** {pending.Reason}");
+            sb.AppendLine($"> **活動總時長：** `{durationStr}`"); // 👈 顯示在面板上
+            sb.AppendLine($"> **預定點數：** `{pending.Points}` 點");
+            sb.AppendLine($"> **符合資格：** `{pending.FinalUserIds.Count}` 人 *(原本條件為待滿5分鐘)*\n");
+
+            sb.AppendLine("👥 **【最終核定發放名單】**");
+            if (pending.FinalUserIds.Any())
+                sb.AppendLine(string.Join(", ", pending.FinalUserIds.Select(id => $"<@{id}>")));
+            else
+                sb.AppendLine("*無人符合資格，或名單已被清空。*");
+
+            sb.AppendLine("\n📜 **【進出入紀錄 (節錄最新)】**\n```ansi");
+            var logsToDisplay = pending.ActionLogs.Skip(Math.Max(0, pending.ActionLogs.Count - 15)).ToList();
+            if (pending.ActionLogs.Count > 15) sb.AppendLine($"... (省略前方 {pending.ActionLogs.Count - 15} 筆)");
+            foreach (var log in logsToDisplay) sb.AppendLine(log);
+            sb.AppendLine("```");
+
+            var cb = new ComponentBuilder()
+                .WithSelectMenu(new SelectMenuBuilder().WithCustomId($"evadd_{sessId}").WithPlaceholder("➕ 選擇破例補登的人員 (可複選)").WithType(ComponentType.UserSelect).WithMaxValues(25))
+                .WithSelectMenu(new SelectMenuBuilder().WithCustomId($"evrem_{sessId}").WithPlaceholder("➖ 選擇要剔除的人員 (可複選)").WithType(ComponentType.UserSelect).WithMaxValues(25))
+                .WithButton("✅ 確定名單並一鍵發放", $"evok_{sessId}", ButtonStyle.Success)
+                .WithButton("❌ 取消作廢", $"evcancel_{sessId}", ButtonStyle.Danger);
+
+            if (isFirst && interaction is SocketSlashCommand cmd) await cmd.FollowupAsync(sb.ToString(), components: cb.Build());
+            else if (interaction is SocketMessageComponent comp) await comp.UpdateAsync(m => { m.Content = sb.ToString(); m.Components = cb.Build(); });
+        }
         // 自動將資料庫的品項清單轉換為精美排版與 ANSI 色塊
         // 自動將管理員的純文字轉換為精美排版與 ANSI 色塊
         private string FormatMenuItems(List<RewardMenuItem> items)
@@ -1723,7 +1855,83 @@ namespace ROCAPointBot
                     _ = BroadcastToAdminChannelsAsync(gid, $"📜 **【MENU 更新公告】**\n> 執行者：**{executor.Username}**\n> 此次 MENU 變動內容如下：\n{diffText}\n> *(大家可使用 `/menu` 查看完整最新品項)*", false);
                     return;
                 }
+                // 👇 新增：處理語音結算面板的下拉式選單與按鈕
+                if (id.StartsWith("evadd_") || id.StartsWith("evrem_"))
+                {
+                    string sessId = id.Split('_')[1];
+                    if (!_pendingDistributions.TryGetValue(sessId, out var pending)) { await component.RespondAsync("❌ 面板已過期。", ephemeral: true); return; }
+                    if (executor.Id != pending.AdminId) { await component.RespondAsync("❌ 僅限發起此活動的長官操作。", ephemeral: true); return; }
 
+                    var selectedIds = component.Data.Values.Select(ulong.Parse).ToList();
+                    if (id.StartsWith("evadd_")) foreach (var uid in selectedIds) pending.FinalUserIds.Add(uid);
+                    else foreach (var uid in selectedIds) pending.FinalUserIds.Remove(uid);
+
+                    await UpdateEventDashboardAsync(component, sessId, executor.Guild);
+                    return;
+                }
+
+                if (id.StartsWith("evcancel_"))
+                {
+                    string sessId = id.Split('_')[1];
+                    _pendingDistributions.Remove(sessId);
+                    await component.UpdateAsync(m => { m.Content = "❌ 此語音活動結算已作廢。"; m.Components = null; });
+                    return;
+                }
+
+                if (id.StartsWith("evok_"))
+                {
+                    string sessId = id.Split('_')[1];
+                    if (!_pendingDistributions.TryGetValue(sessId, out var pending)) { await component.RespondAsync("❌ 面板已失效。", ephemeral: true); return; }
+                    if (executor.Id != pending.AdminId) { await component.RespondAsync("❌ 僅限發起此活動的長官操作。", ephemeral: true); return; }
+
+                    await component.UpdateAsync(m => { m.Content = "⏳ 正在批次發放點數並推播，請稍候..."; m.Components = null; });
+
+                    int successCount = 0;
+                    List<string> failedNames = new();
+
+                    // 開始跑批次發放
+                    foreach (var uid in pending.FinalUserIds)
+                    {
+                        var targetUser = executor.Guild.GetUser(uid);
+                        if (targetUser == null) continue;
+
+                        string name = targetUser.Nickname ?? targetUser.Username;
+                        if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
+
+                        var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
+                        if (rec == null)
+                        {
+                            // 嚴格檢查模式：確保此人有在 Roblox 群組內
+                            if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { failedNames.Add(name); continue; }
+                            rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 };
+                            db.UserPoints.Add(rec);
+                        }
+
+                        rec.Points += pending.Points;
+                        db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = name, AdminName = executor.Username, PointsAdded = pending.Points, Reason = pending.Reason, Timestamp = Program.GetTaipeiTime() });
+                        successCount++;
+                    }
+
+                    await db.SaveChangesAsync();
+                    _ = UpdateGoogleSheetAsync(gid);
+                    _pendingDistributions.Remove(sessId);
+
+                    // 👇 計算用於最終推播的總時長 (精簡到分鐘即可)
+                    var duration = pending.EndTime - pending.StartTime;
+                    string durationStr = $"{(int)duration.TotalHours} 小時 {duration.Minutes} 分鐘";
+
+                    // 👇 在廣播訊息中加入「活動總時長」
+                    string resultMsg = $"✅ **語音活動點數發放完成！**\n>  **成功發放對象：** {successCount} 人\n>  **每人獲得：** {pending.Points} 點\n>  **原因：** {pending.Reason}\n>  **活動總時長：** {durationStr}\n>  **登記長官：** {executor.Mention}";
+                    if (failedNames.Any()) resultMsg += $"\n\n⚠️ **下列人員發放失敗 (未綁定Roblox或不在群組)：**\n`{string.Join(", ", failedNames)}`";
+
+                    // 發布公開廣播 (不限制僅長官可見)
+                    await component.Channel.SendMessageAsync(resultMsg);
+
+                    // 推播給總部與 Log 頻道的訊息也加上時長
+                    bool isAnomaly = pending.Points >= 100;
+                    _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{executor.Username}** 已完成語音活動批次發放\n>  活動：**{pending.Reason}**\n>  總時長：**{durationStr}**\n>  參與人數：**{successCount}** 人\n>  每人獲得：**{pending.Points}** 點", isAnomaly);
+                    return;
+                }
                 // ================================================================
                 // 處理強制同步試算表的按鈕
                 if (id.StartsWith("force_sync_sheet_"))
@@ -1928,7 +2136,30 @@ namespace ROCAPointBot
             // 兼容舊版的單一身分組檢查
             return user.Roles.Any(r => r.Id == config.AdminRoleId);
         }
+        // 👇 新增這段：負責計算進出入時間與紀錄文字日誌
+        private Task HandleVoiceStateUpdatedAsync(SocketUser user, SocketVoiceState oldState, SocketVoiceState newState)
+        {
+            // 情況 A：離開了原本的語音頻道
+            if (oldState.VoiceChannel != null && _activeEvents.TryGetValue(oldState.VoiceChannel.Id, out var leftEvt))
+            {
+                if (leftEvt.Participants.TryGetValue(user.Id, out var p) && p.LastJoinTime.HasValue)
+                {
+                    p.TotalSeconds += (Program.GetTaipeiTime() - p.LastJoinTime.Value).TotalSeconds;
+                    p.LastJoinTime = null; // 標記為不在頻道內
+                    leftEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🔴 {user.Username} 離開了語音");
+                }
+            }
+            // 情況 B：加入了正在追蹤的頻道
+            if (newState.VoiceChannel != null && _activeEvents.TryGetValue(newState.VoiceChannel.Id, out var joinEvt))
+            {
+                if (!joinEvt.Participants.ContainsKey(user.Id))
+                    joinEvt.Participants[user.Id] = new VoiceParticipant();
 
+                joinEvt.Participants[user.Id].LastJoinTime = Program.GetTaipeiTime();
+                joinEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {user.Username} 加入了語音");
+            }
+            return Task.CompletedTask;
+        }
         private async Task BroadcastToAdminChannelsAsync(ulong sourceGuildId, string message, bool isAnomaly = false)
         {
             using var db = new BotDbContext(_configuration);
@@ -2154,5 +2385,33 @@ namespace ROCAPointBot
         public string ItemName { get; set; }
         public int Points { get; set; }
         public string? Note { get; set; }
+    }
+    // 👇 新增：語音活動追蹤專用的類別
+    public class VoiceEventSession
+    {
+        public ulong GuildId { get; set; }
+        public ulong ChannelId { get; set; }
+        public ulong AdminId { get; set; }
+        public string Reason { get; set; }
+        public DateTime StartTime { get; set; }
+        public Dictionary<ulong, VoiceParticipant> Participants { get; set; } = new();
+        public List<string> ActionLogs { get; set; } = new();
+    }
+    public class VoiceParticipant
+    {
+        public DateTime? LastJoinTime { get; set; }
+        public double TotalSeconds { get; set; }
+    }
+    public class PendingEventDistribution
+    {
+        public ulong GuildId { get; set; }
+        public int Points { get; set; }
+        public string Reason { get; set; }
+        public ulong AdminId { get; set; }
+        public HashSet<ulong> FinalUserIds { get; set; } = new();
+        public List<string> ActionLogs { get; set; } = new();
+        // 👇 新增這兩個屬性來記錄活動總時間
+        public DateTime StartTime { get; set; }
+        public DateTime EndTime { get; set; }
     }
 }
