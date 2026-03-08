@@ -1846,9 +1846,13 @@ namespace ROCAPointBot
                 Console.WriteLine($"🗑️ 已自動清理 {removedCount} 位不符合權重或退群的成員。");
             }
 
-            if (addedCount > 0 || removedCount > 0) await db.SaveChangesAsync();
+            // 👇 拔除條件判斷，讓職位更新可以順利存進資料庫！
+            // (EF Core 很聰明，如果資料沒變它就不會寫入，所以直接呼叫是絕對安全的)
+            await db.SaveChangesAsync();
 
-            return (addedCount, removedCount); // 💡 修改為回傳兩個值
+            return (addedCount, removedCount);
+
+          
         }
 
         private async Task<bool> VerifyUserInRobloxGroup(string username, string groupId)
