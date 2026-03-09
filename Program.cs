@@ -2279,10 +2279,11 @@ namespace ROCAPointBot
                     }
                 }
 
-                // 🚀 新增：推播至 Log 頻道
+                // --- 離開語音的推播訊息 ---
                 if (logChannel != null)
                 {
-                    await logChannel.SendMessageAsync($"🔴 **[離開語音]** `[{Program.GetTaipeiTime():HH:mm:ss}]` **{dName}** 離開了頻道 <#{oldState.VoiceChannel.Id}>");
+                    // 將 {Program.GetTaipeiTime():HH:mm:ss} 改為 {Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}
+                    await logChannel.SendMessageAsync($"🔴 **[離開語音]** `[{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}]` **{dName}** 離開了頻道 <#{oldState.VoiceChannel.Id}>");
                 }
             }
 
@@ -2297,10 +2298,11 @@ namespace ROCAPointBot
                     joinEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {dName} 加入了語音");
                 }
 
-                // 🚀 新增：推播至 Log 頻道
+                // --- 進入語音的推播訊息 ---
                 if (logChannel != null)
                 {
-                    await logChannel.SendMessageAsync($"🟢 **[進入語音]** `[{Program.GetTaipeiTime():HH:mm:ss}]` **{dName}** 進入了頻道 <#{newState.VoiceChannel.Id}>");
+                    // 同樣將格式改為 yyyy-MM-dd HH:mm:ss
+                    await logChannel.SendMessageAsync($"🟢 **[進入語音]** `[{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}]` **{dName}** 進入了頻道 <#{newState.VoiceChannel.Id}>");
                 }
             }
         }
