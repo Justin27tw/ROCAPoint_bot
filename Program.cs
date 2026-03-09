@@ -161,7 +161,10 @@ namespace ROCAPointBot
                     // 👇 新增這兩行：自動為現有資料庫加入職位欄位
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE UserPoints ADD RobloxRank NVARCHAR(MAX) NULL"); } catch { }
                     try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE UserPoints ADD RobloxRank TEXT NULL"); } catch { }
+                    // 在 ExecuteAsync 內的資料庫初始化區塊新增這一行：
+                    try { await db.Database.ExecuteSqlRawAsync("ALTER TABLE GuildConfigs ADD VoiceLogChannelId decimal(20,0) NULL"); } catch { }
                     // 自動建立草稿品項資料表
+
                     try
                     {
                         await db.Database.ExecuteSqlRawAsync(@"
@@ -355,6 +358,10 @@ namespace ROCAPointBot
                     // 👇 新增這行：讓長官結算時可以選填備註
                     .AddOption("note", ApplicationCommandOptionType.String, "結算備註 (選填，會附加在活動名稱後方)", isRequired: false)
                     .Build(),
+                new SlashCommandBuilder().WithName("voice-log-setup")
+                .WithDescription("🎤 設定語音頻道進出入紀錄的自動推播頻道")
+                .AddOption("channel", ApplicationCommandOptionType.Channel, "選擇要接收紀錄的文字頻道", isRequired: true)
+                .Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -521,6 +528,23 @@ namespace ROCAPointBot
 
                             _activeEvents.Remove(vcId); // 停止追蹤此頻道
                             await UpdateEventDashboardAsync(command, sessId, guildChannel.Guild, isFirst: true);
+                            break;
+                        }
+                    case "voice-log-setup":
+                        {
+                            if (botConfig == null) { await command.FollowupAsync("❌ 請先完成基本設定。"); break; }
+                            if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 權限不足。"); return; }
+
+                            var channelOpt = (SocketChannel)command.Data.Options.First().Value;
+                            if (!(channelOpt is ITextChannel))
+                            {
+                                await command.FollowupAsync("❌ 請選擇一個「文字頻道」！");
+                                return;
+                            }
+
+                            botConfig.VoiceLogChannelId = channelOpt.Id;
+                            await db.SaveChangesAsync();
+                            await command.FollowupAsync($"✅ **語音監控已啟動！**\n> 往後所有人員進出語音頻道，都會推播至：<#{channelOpt.Id}>");
                             break;
                         }
                     case "sync-members":
@@ -2222,33 +2246,63 @@ namespace ROCAPointBot
         }
         // 👇 新增這段：負責計算進出入時間與紀錄文字日誌
         // 👇 負責計算進出入時間與紀錄文字日誌 (已修正顯示名稱與防 Bot)
-        private Task HandleVoiceStateUpdatedAsync(SocketUser user, SocketVoiceState oldState, SocketVoiceState newState)
+        private async Task HandleVoiceStateUpdatedAsync(SocketUser user, SocketVoiceState oldState, SocketVoiceState newState)
         {
-            if (user.IsBot) return Task.CompletedTask; // 👈 排除所有機器人進出紀錄
+            if (user.IsBot) return;
 
-            // 優先抓取伺服器內設定的暱稱
-            string dName = (user as SocketGuildUser)?.Nickname ?? user.GlobalName ?? user.Username;
+            // 取得 Discord 伺服器暱稱 (Nickname)
+            var gUser = user as SocketGuildUser;
+            string dName = gUser?.Nickname ?? user.GlobalName ?? user.Username;
+            ulong gid = gUser?.Guild.Id ?? 0;
 
-            // 情況 A：離開了原本的語音頻道
-            if (oldState.VoiceChannel != null && _activeEvents.TryGetValue(oldState.VoiceChannel.Id, out var leftEvt))
+            using var db = new BotDbContext(_configuration);
+            var config = await db.Configs.FindAsync(gid);
+
+            // 取得推播頻道
+            ITextChannel logChannel = null;
+            if (config?.VoiceLogChannelId != null)
             {
-                if (leftEvt.Participants.TryGetValue(user.Id, out var p) && p.LastJoinTime.HasValue)
+                logChannel = _client.GetChannel(config.VoiceLogChannelId.Value) as ITextChannel;
+            }
+
+            // 情況 A：離開語音 (從有頻道變成沒頻道，或是切換頻道)
+            if (oldState.VoiceChannel != null && newState.VoiceChannel?.Id != oldState.VoiceChannel.Id)
+            {
+                // 原有的活動紀錄邏輯 (保留您程式碼中原本的 _activeEvents 處理)
+                if (_activeEvents.TryGetValue(oldState.VoiceChannel.Id, out var leftEvt))
                 {
-                    p.TotalSeconds += (Program.GetTaipeiTime() - p.LastJoinTime.Value).TotalSeconds;
-                    p.LastJoinTime = null; // 標記為不在頻道內
-                    leftEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🔴 {dName} 離開了語音");
+                    if (leftEvt.Participants.TryGetValue(user.Id, out var p) && p.LastJoinTime.HasValue)
+                    {
+                        p.TotalSeconds += (Program.GetTaipeiTime() - p.LastJoinTime.Value).TotalSeconds;
+                        p.LastJoinTime = null;
+                        leftEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🔴 {dName} 離開了語音");
+                    }
+                }
+
+                // 🚀 新增：推播至 Log 頻道
+                if (logChannel != null)
+                {
+                    await logChannel.SendMessageAsync($"🔴 **[離開語音]** `[{Program.GetTaipeiTime():HH:mm:ss}]` **{dName}** 離開了頻道 <#{oldState.VoiceChannel.Id}>");
                 }
             }
-            // 情況 B：加入了正在追蹤的頻道
-            if (newState.VoiceChannel != null && _activeEvents.TryGetValue(newState.VoiceChannel.Id, out var joinEvt))
-            {
-                if (!joinEvt.Participants.ContainsKey(user.Id))
-                    joinEvt.Participants[user.Id] = new VoiceParticipant();
 
-                joinEvt.Participants[user.Id].LastJoinTime = Program.GetTaipeiTime();
-                joinEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {dName} 加入了語音");
+            // 情況 B：進入語音 (從沒頻道變成有頻道，或是切換頻道)
+            if (newState.VoiceChannel != null && oldState.VoiceChannel?.Id != newState.VoiceChannel.Id)
+            {
+                // 原有的活動紀錄邏輯
+                if (_activeEvents.TryGetValue(newState.VoiceChannel.Id, out var joinEvt))
+                {
+                    if (!joinEvt.Participants.ContainsKey(user.Id)) joinEvt.Participants[user.Id] = new VoiceParticipant();
+                    joinEvt.Participants[user.Id].LastJoinTime = Program.GetTaipeiTime();
+                    joinEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {dName} 加入了語音");
+                }
+
+                // 🚀 新增：推播至 Log 頻道
+                if (logChannel != null)
+                {
+                    await logChannel.SendMessageAsync($"🟢 **[進入語音]** `[{Program.GetTaipeiTime():HH:mm:ss}]` **{dName}** 進入了頻道 <#{newState.VoiceChannel.Id}>");
+                }
             }
-            return Task.CompletedTask;
         }
         private async Task BroadcastToAdminChannelsAsync(ulong sourceGuildId, string message, bool isAnomaly = false)
         {
@@ -2453,6 +2507,7 @@ namespace ROCAPointBot
         // 在 BotConfig 類別中加入這兩行：
         public string? RewardMenuContent { get; set; }
         public DateTime? RewardMenuUpdateTime { get; set; }
+        public ulong? VoiceLogChannelId { get; set; } // 👈 新增此行
     }
     // 👇 新增這個類別：記錄哪個頻道負責監聽哪些伺服器編號
     public class AdminChannelConfig
