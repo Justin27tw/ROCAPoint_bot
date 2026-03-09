@@ -1369,11 +1369,28 @@ namespace ROCAPointBot
                             if (botConfig == null) { await command.FollowupAsync("❌ 未設定。"); break; }
                             if (!IsAdmin((SocketGuildUser)command.User, botConfig)) { await command.FollowupAsync("❌ 權限不足，僅限管理員查看。"); return; }
 
-                            var roles = botConfig.AdminRoleIds?.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList() ?? new List<string>();
-                            if (!roles.Any()) roles.Add(botConfig.AdminRoleId.ToString()); // 相容舊版資料
+                          // 1. 取得所有管理員身分組清單 
+                            var roles = botConfig.AdminRoleIds?.Split(',')
+                                .Where(s => !string.IsNullOrEmpty(s))
+                                .Select(ulong.Parse)
+                                .ToList() ?? new List<ulong>();
 
-                            var roleMentions = roles.Select(id => $"<@&{id}>");
-                            await command.FollowupAsync($"👮 **目前的管理員身分組名單：**\n{string.Join("\n", roleMentions)}");
+                          // 若 AdminRoleIds 為空，則加入舊有的單一管理員身分組作為相容 
+                            if (!roles.Any() && botConfig.AdminRoleId != 0) roles.Add(botConfig.AdminRoleId);
+
+                            var sb = new StringBuilder("👮 **目前的管理員身分組名單：**\n");
+
+                            foreach (var roleId in roles)
+                            {
+                                // 2. 比對是否為主要身分組 (AdminRoleId) 
+                                bool isPrimary = roleId == botConfig.AdminRoleId;
+
+                                // 3. 組合顯示文字，如果是主要身分組則加上標籤
+                                string label = isPrimary ? " ⭐ **主要 (異常或刪除資料時會被標記)**" : "";
+                                sb.AppendLine($"> <@&{roleId}>{label}");
+                            }
+
+                            await command.FollowupAsync(sb.ToString());
                             break;
                         }
                     case "bind-sheet":
