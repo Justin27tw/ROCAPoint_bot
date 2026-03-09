@@ -1389,7 +1389,7 @@ namespace ROCAPointBot
                           // 若 AdminRoleIds 為空，則加入舊有的單一管理員身分組作為相容 
                             if (!roles.Any() && botConfig.AdminRoleId != 0) roles.Add(botConfig.AdminRoleId);
 
-                            var sb = new StringBuilder("👮 **目前的管理員身分組名單：**\n");
+                            var sb = new StringBuilder(" **目前的管理員身分組名單：**\n");
 
                             foreach (var roleId in roles)
                             {
