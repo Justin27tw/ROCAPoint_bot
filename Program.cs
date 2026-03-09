@@ -56,6 +56,8 @@ namespace ROCAPointBot
         // 👇 新增這兩個靜態變數，用來暫存追蹤中的語音頻道與結算面板
         private static Dictionary<ulong, VoiceEventSession> _activeEvents = new();
         private static Dictionary<string, PendingEventDistribution> _pendingDistributions = new();
+        // 新增：用來暫存管理員權限變更請求的字典
+        private static Dictionary<string, PendingAdminChange> _pendingAdminEdits = new();
         public DiscordBotService(IConfiguration config)
         {
             _configuration = config;
@@ -734,9 +736,18 @@ namespace ROCAPointBot
                             int adminCount = GetAdminCount(guildChannel.Guild, botConfig);
                             bool requiresDual = adminCount >= 2 && exec.Id != _developerId;
 
-                            // 將所有變更資訊封裝進 CustomID，以便在按下按鈕時讀回
-                            string dataPayload = $"{subCommand.Name}_{nextPrimaryId}_{finalIds}";
-                            string btnId = requiresDual ? $"editadm_s1_{gid}_{dataPayload}" : $"editadm_single_{gid}_{dataPayload}";
+                            // 生成一個短的 Session ID (8碼)
+                            string sessId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                            _pendingAdminEdits[sessId] = new PendingAdminChange
+                            {
+                                GuildId = gid,
+                                Action = subCommand.Name,
+                                PrimaryId = nextPrimaryId,
+                                FinalIds = string.Join(",", nextRoleIds)
+                            };
+
+                            // 縮短按鈕 ID，只傳遞前綴與 sessId
+                            string btnId = requiresDual ? $"eadm_s1_{sessId}" : $"eadm_si_{sessId}";
 
                             var btns = new ComponentBuilder()
                                 .WithButton(requiresDual ? "⚠️ 第一位管理員確認" : "⚠️ 確認變更 (開發者權限)", btnId, ButtonStyle.Danger)
@@ -1782,69 +1793,54 @@ namespace ROCAPointBot
                     return;
                 }
 
-                // 處理第一位管理員確認
-                if (id.StartsWith("editadm_s1_"))
+                // 處理第一位管理員確認 (s1)
+                if (id.StartsWith("eadm_s1_"))
                 {
-                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+                    string sessId = id.Split('_')[2];
+                    if (!_pendingAdminEdits.TryGetValue(sessId, out var pending)) { await component.RespondAsync("❌ 此請求已過期，請重新輸入指令。", ephemeral: true); return; }
 
-                    var parts = id.Split('_');
-                    // 結構：[0]editadm, [1]s1, [2]gid, [3]action, [4]primaryId, [5]finalIds
-                    string action = parts[3];
-                    string primaryIdStr = parts[4];
-                    string finalIds = parts[5];
+                    pending.FirstAdminId = executor.Id; // 記錄第一位是誰
+                    string actionText = pending.Action switch { "add" => "新增", "remove" => "移除", "replace" => "替換", "set-primary" => "設定第一順位", _ => "修改" };
 
-                    string actionText = action switch { "add" => "新增", "remove" => "移除", "replace" => "替換", "set-primary" => "設定第一順位", _ => "修改" };
-
-                    // 👇 將原本的資料 Payload 完整帶到下一步 (s2)
                     var btn2 = new ComponentBuilder()
-                        .WithButton("🚨 第二位管理員最終確認", $"editadm_s2_{gid}_{action}_{primaryIdStr}_{finalIds}_{executor.Id}", ButtonStyle.Danger)
+                        .WithButton("🚨 第二位管理員最終確認", $"eadm_s2_{sessId}", ButtonStyle.Danger)
                         .WithButton("取消", $"editadm_cancel_{gid}", ButtonStyle.Secondary);
 
                     await component.UpdateAsync(m => {
                         m.Content = $"🚨 **【最終警告：權限變更】**\n> 動作：**{actionText}** 管理員名單\n> 第一位管理員 {executor.Mention} 已確認變更內容。\n> 需要 **第二位不同的管理員** 按下確認才能正式套用！";
                         m.Components = btn2.Build();
                     });
-
-                    if (botConfig != null)
-                    {
-                        string adminRoleMention = $"<@&{botConfig.AdminRoleId}>";
-                        await component.Channel.SendMessageAsync($"🔔 {adminRoleMention} 警告：{executor.Mention} 正在申請變更管理權限名單，請另一位管理員至上方訊息進行最終確認！");
-                    }
                     return;
                 }
 
-                // 處理第二位管理員最終確認
-                if (id.StartsWith("editadm_s2_"))
+                // 處理第二位管理員確認 (s2) 或 單人確認 (si)
+                if (id.StartsWith("eadm_s2_") || id.StartsWith("eadm_si_"))
                 {
-                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足，僅限管理員確認。", ephemeral: true); return; }
+                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
+                    string sessId = id.Split('_')[2];
+                    if (!_pendingAdminEdits.TryGetValue(sessId, out var pending)) { await component.RespondAsync("❌ 此請求已過期。", ephemeral: true); return; }
 
-                    var parts = id.Split('_');
-                    // 結構：[0]editadm, [1]s2, [2]gid, [3]action, [4]primaryId, [5]finalIds, [6]firstAdminId
-                    string action = parts[3];
-                    ulong nextPrimary = ulong.Parse(parts[4]);
-                    string finalRoleIdsStr = parts[5];
-                    ulong firstAdminId = ulong.Parse(parts[6]);
-
-                    if (executor.Id == firstAdminId)
+                    // 如果是雙人確認模式且同一個人點擊
+                    if (id.Contains("_s2_") && executor.Id == pending.FirstAdminId && executor.Id != _developerId)
                     {
-                        await component.RespondAsync("❌ 您已經確認過了！必須由 **另一位不同的管理員** 來進行最終確認。", ephemeral: true);
+                        await component.RespondAsync("❌ 您已經確認過了！必須由 **另一位不同管理員** 確認。", ephemeral: true);
                         return;
                     }
 
                     if (botConfig != null)
                     {
-                        // 👇 直接寫入我們在 Slash Command 階段就運算好的最終結果
-                        botConfig.AdminRoleId = nextPrimary;
-                        botConfig.AdminRoleIds = finalRoleIdsStr;
-
+                        botConfig.AdminRoleId = pending.PrimaryId;
+                        botConfig.AdminRoleIds = pending.FinalIds;
                         await db.SaveChangesAsync();
 
                         await component.UpdateAsync(m => {
-                            m.Content = $"✅ **管理員權限名單變更成功！**\n> 執行者：<@{firstAdminId}> 與 {executor.Mention}\n> 目前第一順位(Ping對象)：<@&{nextPrimary}>";
+                            m.Content = $"✅ **管理員權限名單變更成功！**\n> 執行者：{executor.Mention}\n> 目前第一順位(Ping對象)：<@&{pending.PrimaryId}>";
                             m.Components = null;
                         });
 
-                        _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【管理員權限變更】**\n> 動作：`{action}`\n> 新第一順位：<@&{nextPrimary}>\n> 變更名單：{finalRoleIdsStr}\n> 授權執行者：<@{firstAdminId}> 與 {executor.Username}", true);
+                        _pendingAdminEdits.Remove(sessId); // 執行完畢，移除暫存
+                        _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【管理員權限變更】**\n> 動作：`{pending.Action}`\n> 新第一順位：<@&{pending.PrimaryId}>\n> 執行者：{executor.Username}", true);
                     }
                     return;
                 }
@@ -1879,30 +1875,7 @@ namespace ROCAPointBot
                     return;
                 }
 
-                if (id.StartsWith("editadm_single_"))
-                {
-                    if (!isAdmin) { await component.RespondAsync("❌ 權限不足。", ephemeral: true); return; }
-                    var parts = id.Split('_');
-                    // parts 結構：[0]editadm, [1]single, [2]gid, [3]action, [4]primaryId, [5]finalIds
-                    string action = parts[3];
-                    ulong nextPrimary = ulong.Parse(parts[4]);
-                    string finalRoleIdsStr = parts[5];
-
-                    if (botConfig != null)
-                    {
-                        botConfig.AdminRoleId = nextPrimary;
-                        botConfig.AdminRoleIds = finalRoleIdsStr;
-                        await db.SaveChangesAsync();
-
-                        await component.UpdateAsync(m => {
-                            m.Content = $"✅ **權限變更成功！** (單人確認模式)\n> 執行者：{executor.Mention}\n> 目前第一順位：<@&{nextPrimary}>";
-                            m.Components = null;
-                        });
-
-                        _ = BroadcastToAdminChannelsAsync(gid, $"🚨 **【管理員權限變更】**\n> 動作：`{action}`\n> 新第一順位：<@&{nextPrimary}>\n> 執行者：{executor.Username}", true);
-                    }
-                    return;
-                }
+                
 
                 // 4. 新的單人發布 MENU 邏輯
                 if (id.StartsWith("menuok_single_"))
@@ -2530,5 +2503,14 @@ namespace ROCAPointBot
         // 👇 新增這兩個屬性來記錄活動總時間
         public DateTime StartTime { get; set; }
         public DateTime EndTime { get; set; }
+    }
+    // 類別：記錄待處理的管理員變更資料
+    public class PendingAdminChange
+    {
+        public ulong GuildId { get; set; }
+        public string Action { get; set; }
+        public ulong PrimaryId { get; set; }
+        public string FinalIds { get; set; }
+        public ulong FirstAdminId { get; set; }
     }
 }
