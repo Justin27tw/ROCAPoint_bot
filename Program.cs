@@ -58,6 +58,8 @@ namespace ROCAPointBot
         private static Dictionary<string, PendingEventDistribution> _pendingDistributions = new();
         // 新增：用來暫存管理員權限變更請求的字典
         private static Dictionary<string, PendingAdminChange> _pendingAdminEdits = new();
+        // 👇 新增：存放申請單的暫存內容 (Key 為申請 ID)
+        private static Dictionary<string, PendingApplication> _pendingApplications = new();
         public DiscordBotService(IConfiguration config)
         {
             _configuration = config;
@@ -362,6 +364,8 @@ namespace ROCAPointBot
                 .WithDescription("🎤 設定語音頻道進出入紀錄的自動推播頻道")
                 .AddOption("channel", ApplicationCommandOptionType.Channel, "選擇要接收紀錄的文字頻道", isRequired: true)
                 .Build(),
+                new SlashCommandBuilder().WithName("apply-points").WithDescription(" 提交點數發放申請 (需附證明連結)").Build(),
+                new SlashCommandBuilder().WithName("apply-redeem").WithDescription(" 提交點數兌換申請 (兌換 MENU 內容)").Build(),
             };
             try { await _client.BulkOverwriteGlobalApplicationCommandsAsync(commands.ToArray()); } catch (Exception ex) { Console.WriteLine(ex.Message); }
         }
@@ -1558,6 +1562,28 @@ namespace ROCAPointBot
                             await command.FollowupAsync(targetSb.ToString());
                             break;
                         }
+                    case "apply-points":
+                        {
+                            var modal = new ModalBuilder()
+                                .WithTitle("點數核發申請單")
+                                .WithCustomId("modal_user_apply_add")
+                                .AddTextInput("活動、訓練名稱/值勤時數", "reason", placeholder: "例如：03/10 聯合演習", required: true)
+                                .AddTextInput("申請點數數量", "amount", placeholder: "請輸入數字 (例如: 2)", required: true)
+                                .AddTextInput("截圖證明連結", "evidence", placeholder: "請貼上 Imgur 或 Discord 截圖網址", required: true);
+                            await command.RespondWithModalAsync(modal.Build());
+                            break;
+                        }
+                    case "apply-redeem":
+                        {
+                            var modal = new ModalBuilder()
+                                .WithTitle(" 點數兌換申請單")
+                                .WithCustomId("modal_user_apply_rem")
+                                .AddTextInput("想兌換的名稱", "item_name", placeholder: "請參考 /menu 內的名稱", required: true)
+                                .AddTextInput("所需點數", "amount", placeholder: "請輸入該品項所需點數", required: true)
+                                .AddTextInput("備註", "note", placeholder: "選填：例如想要兌換的職位名稱", required: false, style: TextInputStyle.Paragraph);
+                            await command.RespondWithModalAsync(modal.Build());
+                            break;
+                        }
                 }
 
             }
@@ -1751,6 +1777,7 @@ namespace ROCAPointBot
                         await component.RespondAsync("❌ 發生內部錯誤，無法辨識第一位管理員的身分。", ephemeral: true);
                     }
                 }
+
                 // ==================== 解除綁定 (Unbind) 雙重確認邏輯 ====================
 
                 // 處理取消按鈕
@@ -2083,7 +2110,152 @@ namespace ROCAPointBot
                     await component.FollowupAsync("✅ **同步完成！** 您現在可以點擊上方的連結前往查看最新數據。", ephemeral: true);
                     return;
                 }
+                // 👇 在這裡新增處理「審核按鈕」的邏輯 (這部分在第三步詳細說明)
+                if (id.StartsWith("appr_") || id.StartsWith("rejt_"))
+                {
+                    await HandleReviewActionAsync(component);
+                    return;
+                }
             }
+            // 👇 新增：處理「彈窗提交」的邏輯
+            else if (interaction is SocketModal modal)
+            {
+                ulong gid = (ulong)modal.GuildId;
+                using var db = new BotDbContext(_configuration);
+                var config = await db.Configs.FindAsync(gid);
+
+                // 檢查是否有設定 Log 頻道，否則申請單沒地方去
+                if (config?.MasterLogChannelId == null)
+                {
+                    await modal.RespondAsync("❌ 伺服器尚未設定紀錄頻道 (MasterLogChannel)，請聯絡管理員設定後再申請。", ephemeral: true);
+                    return;
+                }
+
+                var reviewChannel = await _client.GetChannelAsync(config.MasterLogChannelId.Value) as ITextChannel;
+                string appId = Guid.NewGuid().ToString("N").Substring(0, 8); // 生成申請編號
+
+                var app = new PendingApplication { GuildId = gid, ApplicantId = modal.User.Id };
+
+                if (modal.Data.CustomId == "modal_user_apply_add")
+                {
+                    app.Type = "發放";
+                    app.Reason = modal.Data.Components.First(x => x.CustomId == "reason").Value;
+                    app.Amount = int.TryParse(modal.Data.Components.First(x => x.CustomId == "amount").Value, out var a) ? a : 0;
+                    app.Evidence = modal.Data.Components.First(x => x.CustomId == "evidence").Value;
+                }
+                else if (modal.Data.CustomId == "modal_user_apply_rem")
+                {
+                    app.Type = "兌換";
+                    app.Reason = modal.Data.Components.First(x => x.CustomId == "item_name").Value;
+                    app.Amount = int.TryParse(modal.Data.Components.First(x => x.CustomId == "amount").Value, out var a) ? a : 0;
+                    app.Note = modal.Data.Components.First(x => x.CustomId == "note").Value;
+                }
+
+                _pendingApplications[appId] = app;
+
+                // 建立發送給管理員看的 Embed
+                var embed = new EmbedBuilder()
+                    .WithTitle($"📝 新點數申請單 [#{appId}]")
+                    // ✅ 明確指定 Discord 命名空間
+                    .WithColor(app.Type == "發放" ? Discord.Color.Green : Discord.Color.Orange)
+                    .AddField("申請類型", app.Type, true)
+                    .AddField("申請人", modal.User.Mention, true)
+                    .AddField("金額", $"{app.Amount} 點", true)
+                    .AddField("事由/品項", app.Reason)
+                    .WithFooter($"申請時間: {Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}");
+
+                if (!string.IsNullOrEmpty(app.Evidence)) embed.AddField("證明連結", app.Evidence);
+                if (!string.IsNullOrEmpty(app.Note)) embed.AddField("額外備註", app.Note);
+
+                var buttons = new ComponentBuilder()
+                    .WithButton("✅ 核准", $"appr_{appId}", ButtonStyle.Success)
+                    .WithButton("❌ 駁回", $"rejt_{appId}", ButtonStyle.Danger);
+
+                // ✅ 優化後的寫法
+                string displayName = (modal.User as SocketGuildUser)?.Nickname ?? modal.User.Username;
+                await reviewChannel.SendMessageAsync($"🔔 有新的點數申請 (申請人: {displayName})", embed: embed.Build(), components: buttons.Build());
+                await modal.RespondAsync("✅ 您的申請已提交，請靜候長官審核。", ephemeral: true);
+            }
+
+        }
+        private async Task HandleReviewActionAsync(SocketMessageComponent component)
+        {
+            string[] parts = component.Data.CustomId.Split('_');
+            string action = parts[0]; // appr 或 rejt
+            string appId = parts[1];
+
+            if (!_pendingApplications.TryGetValue(appId, out var app))
+            {
+                await component.RespondAsync("❌ 找不到此申請資料，可能因為機器人重啟而已過期。", ephemeral: true);
+                return;
+            }
+
+            using var db = new BotDbContext(_configuration);
+            var botConfig = await db.Configs.FindAsync(app.GuildId);
+
+            // 只有管理員可以審核
+            if (!IsAdmin((SocketGuildUser)component.User, botConfig))
+            {
+                await component.RespondAsync("❌ 您不具備管理員權限，無法審核申請。", ephemeral: true);
+                return;
+            }
+
+            if (action == "rejt")
+            {
+                await component.UpdateAsync(m => {
+                    m.Content = $"❌ **申請已駁回**\n> 審核人：{component.User.Mention}\n> 申請編號：#{appId}";
+                    m.Embeds = null; m.Components = null;
+                });
+                _pendingApplications.Remove(appId);
+                return;
+            }
+
+            // ✅ 先將 Channel 轉型為 SocketGuildChannel 即可取得 Guild
+            var guild = (component.Channel as SocketGuildChannel).Guild;
+            var applicant = guild.GetUser(app.ApplicantId);
+            string name = applicant?.Nickname ?? applicant?.Username ?? "未知";
+            if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
+
+            var userPoint = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == app.GuildId && u.RobloxUsername.ToLower() == name.ToLower());
+
+            if (applicant == null)
+            {
+                await component.RespondAsync("❌ 找不到該申請人，該成員可能已離開伺服器。", ephemeral: true);
+                return;
+            }
+
+            // 如果是兌換，檢查點數是否足夠
+            if (app.Type == "兌換" && userPoint.Points < app.Amount)
+            {
+                await component.RespondAsync($"❌ 申請人點數不足（現有 {userPoint.Points} 點），無法核准兌換。", ephemeral: true);
+                return;
+            }
+
+            int change = app.Type == "發放" ? app.Amount : -app.Amount;
+            userPoint.Points += change;
+
+            var log = new PointLog
+            {
+                GuildId = app.GuildId,
+                RobloxUsername = name,
+                AdminName = $"系統審核({component.User.Username})",
+                PointsAdded = change,
+                Reason = $"[申請核准] {app.Reason}",
+                Timestamp = Program.GetTaipeiTime()
+            };
+            db.PointLogs.Add(log);
+            await db.SaveChangesAsync();
+            _ = UpdateGoogleSheetAsync(app.GuildId);
+
+            await component.UpdateAsync(m => {
+                m.Content = $"✅ **申請已核准**\n> 審核人：{component.User.Mention}\n> 申請人：{applicant?.Mention} ({name})\n> 變動：{change} 點 (目前: {userPoint.Points})\n> 原因：{app.Reason}";
+                m.Embeds = null; m.Components = null;
+            });
+
+            // 推播給國防部
+            _ = BroadcastToAdminChannelsAsync(app.GuildId, $"已核准 **{name}** 的申請\n> 動作：{app.Type} {app.Amount} 點\n> 原因：{app.Reason}\n> 紀錄編號：#{log.Id}", Math.Abs(change) >= 100);
+
+            _pendingApplications.Remove(appId);
         }
         // 💡 回傳型態改為 (int added, int removed)
         private async Task<(int added, int removed)> SyncGroupMembersAsync(BotDbContext db, ulong guildId, string groupId)
@@ -2595,5 +2767,15 @@ namespace ROCAPointBot
         public ulong PrimaryId { get; set; }
         public string FinalIds { get; set; }
         public ulong FirstAdminId { get; set; }
+    }
+    public class PendingApplication
+    {
+        public ulong GuildId { get; set; }
+        public ulong ApplicantId { get; set; }
+        public string Type { get; set; } // 發放 或 兌換
+        public string Reason { get; set; }
+        public int Amount { get; set; }
+        public string? Evidence { get; set; } // 僅發放有
+        public string? Note { get; set; }     // 僅兌換有
     }
 }
