@@ -378,9 +378,24 @@ namespace ROCAPointBot
             try
             {
                 // 將原本的 bool isEphemeral = ... 替換為以下這行 (在最後面加上了 change-menu-item)：
-                bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info" || command.Data.Name == "change-menu-item" || command.Data.Name == "service-days" || command.Data.Name == "start-event" || command.Data.Name == "end-event";
-                // 2. 全部統一 Defer (把原本的 if 判斷直接刪除，改成這行)
-                await command.DeferAsync(ephemeral: isEphemeral);
+                //bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" || command.Data.Name == "sync-members" || command.Data.Name == "points" || command.Data.Name == "history" || command.Data.Name == "my-code" || command.Data.Name == "log-channel" || command.Data.Name == "menu" || command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" || command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" || command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" || command.Data.Name == "group-info" || command.Data.Name == "change-menu-item" || command.Data.Name == "service-days" || command.Data.Name == "start-event" || command.Data.Name == "end-event";
+                // ✅ 修正後的寫法：排除掉會彈出視窗的指令
+                if (command.Data.Name != "apply-points" && command.Data.Name != "apply-redeem")
+                {
+                    // 只有非彈窗指令才需要 Defer
+                    bool isEphemeral = command.Data.Name == "setup-roca" || command.Data.Name == "unbind-roca" ||
+                                       command.Data.Name == "sync-members" || command.Data.Name == "points" ||
+                                       command.Data.Name == "history" || command.Data.Name == "my-code" ||
+                                       command.Data.Name == "log-channel" || command.Data.Name == "menu" ||
+                                       command.Data.Name == "view-admins" || command.Data.Name == "add-menu-item" ||
+                                       command.Data.Name == "remove-menu-item" || command.Data.Name == "edit-menu" ||
+                                       command.Data.Name == "bind-sheet" || command.Data.Name == "my-info" ||
+                                       command.Data.Name == "group-info" || command.Data.Name == "change-menu-item" ||
+                                       command.Data.Name == "service-days" || command.Data.Name == "start-event" ||
+                                       command.Data.Name == "end-event";
+
+                    await command.DeferAsync(ephemeral: isEphemeral);
+                }
 
                 using var db = new BotDbContext(_configuration);
                 if (!await db.Database.CanConnectAsync())
