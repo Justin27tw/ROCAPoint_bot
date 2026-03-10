@@ -451,15 +451,7 @@ namespace ROCAPointBot
                                 StartTime = Program.GetTaipeiTime()
                             };
 
-                            // 🚩 記錄指令當下已在頻道內的人員
-                            foreach (var u in exec.VoiceChannel.Users.Where(u => !u.IsBot))
-                            {
-                                newEvt.Participants[u.Id] = new VoiceParticipant
-                                {
-                                    LastJoinTime = newEvt.StartTime,
-                                    DisplayName = u.Nickname ?? u.GlobalName ?? u.Username // 解決報錯處
-                                };
-                            }
+                           
 
                             _activeEvents[vcId] = newEvt;
                             await command.FollowupAsync($"🎤 **[憲兵] 活動紀錄開始！**\n> 📍 偵測頻道：<#{vcId}>\n> ⏱️ 開始時間：{newEvt.StartTime:HH:mm:ss}\n> 🔍 結束時將回溯 <#1480596059100156055> 日誌進行結算。");
