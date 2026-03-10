@@ -436,37 +436,33 @@ namespace ROCAPointBot
                         {
                             if (botConfig == null) { await command.FollowupAsync("❌ 請先設定機器人。"); return; }
                             var exec = (SocketGuildUser)command.User;
-                            if (!IsAdmin(exec, botConfig) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
-
-                            if (exec.VoiceChannel == null)
-                            {
-                                await command.FollowupAsync("❌ 您必須先進入一個「語音頻道」，才能對該頻道開始紀錄！");
-                                return;
-                            }
+                            if (!IsAdmin(exec, botConfig)) { await command.FollowupAsync("❌ 權限不足。"); return; }
+                            if (exec.VoiceChannel == null) { await command.FollowupAsync("❌ 您必須先進入語音頻道！"); return; }
 
                             ulong vcId = exec.VoiceChannel.Id;
-                            if (_activeEvents.ContainsKey(vcId))
-                            {
-                                await command.FollowupAsync($"❌ 頻道 <#{vcId}> 已經在紀錄中了！請先使用 `/end-event` 結束它。");
-                                return;
-                            }
-
                             string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
 
-                            var newEvt = new VoiceEventSession { GuildId = gid, ChannelId = vcId, AdminId = exec.Id, Reason = reason, StartTime = Program.GetTaipeiTime() };
-
-                            // 把當下已經在頻道內的人先加進去，當作 0 秒起算
-                            foreach (var u in exec.VoiceChannel.Users)
+                            var newEvt = new VoiceEventSession
                             {
-                                if (u.IsBot) continue; // 👈 排除機器人
-                                string dName = u.Nickname ?? u.GlobalName ?? u.Username; // 👈 優先抓取伺服器暱稱
+                                GuildId = gid,
+                                ChannelId = vcId,
+                                AdminId = exec.Id,
+                                Reason = reason,
+                                StartTime = Program.GetTaipeiTime()
+                            };
 
-                                newEvt.Participants[u.Id] = new VoiceParticipant { LastJoinTime = Program.GetTaipeiTime() };
-                                newEvt.ActionLogs.Add($"[{Program.GetTaipeiTime():HH:mm:ss}] 🟢 {dName} (原先已在頻道內)");
+                            // 🚩 記錄指令當下已在頻道內的人員
+                            foreach (var u in exec.VoiceChannel.Users.Where(u => !u.IsBot))
+                            {
+                                newEvt.Participants[u.Id] = new VoiceParticipant
+                                {
+                                    LastJoinTime = newEvt.StartTime,
+                                    DisplayName = u.Nickname ?? u.GlobalName ?? u.Username // 解決報錯處
+                                };
                             }
 
                             _activeEvents[vcId] = newEvt;
-                            await command.FollowupAsync($"🎤 **活動開始紀錄！**\n> 📍 **頻道：** <#{vcId}>\n> 📝 **原因：** {reason}\n> ⏱️ **時間：** {newEvt.StartTime:HH:mm:ss}\n> *(機器人將自動統計進出時間，請於活動結束時在此輸入 `/end-event`)*");
+                            await command.FollowupAsync($"🎤 **[憲兵] 活動紀錄開始！**\n> 📍 偵測頻道：<#{vcId}>\n> ⏱️ 開始時間：{newEvt.StartTime:HH:mm:ss}\n> 🔍 結束時將回溯 <#1480596059100156055> 日誌進行結算。");
                             break;
                         }
 
@@ -476,7 +472,7 @@ namespace ROCAPointBot
                             var exec = (SocketGuildUser)command.User;
                             if (!IsAdmin(exec, botConfig) && exec.Id != guildChannel.Guild.OwnerId) { await command.FollowupAsync("❌ 權限不足。"); return; }
 
-                            if (exec.VoiceChannel == null) { await command.FollowupAsync("❌ 您必須待在要結束紀錄的「語音頻道」內！"); return; }
+                            if (exec.VoiceChannel == null) { await command.FollowupAsync("❌ 您必須在活動所在的語音頻道內執行結束指令！"); return; }
 
                             ulong vcId = exec.VoiceChannel.Id;
                             if (!_activeEvents.TryGetValue(vcId, out var evt))
@@ -486,47 +482,83 @@ namespace ROCAPointBot
                             }
 
                             int points = Convert.ToInt32((long)command.Data.Options.First(x => x.Name == "points").Value);
-
-                            // 👇 讀取長官填寫的備註 (如果有填的話)
                             var noteOption = command.Data.Options.FirstOrDefault(x => x.Name == "note");
-                            string noteStr = noteOption != null ? (string)noteOption.Value : string.Empty;
-
-                            // 👇 將原活動原因與備註組合在一起
-                            string finalReason = evt.Reason;
-                            if (!string.IsNullOrEmpty(noteStr))
-                            {
-                                finalReason += $" (備註：{noteStr})";
-                            }
+                            string finalReason = evt.Reason + (noteOption != null ? $" (備註：{noteOption.Value})" : "");
 
                             var now = Program.GetTaipeiTime();
 
-                            // 結算所有人的最終停留時間
-                            foreach (var kvp in evt.Participants)
+                            // 🚩 憲兵專屬：回溯文字日誌頻道 1480596059100156055
+                            if (botConfig.RobloxGroupId == "13549943")
                             {
-                                if (kvp.Value.LastJoinTime.HasValue)
+                                ulong voiceLogChannelId = 1480596059100156055;
+                                var logChannel = _client.GetChannel(voiceLogChannelId) as ITextChannel;
+
+                                if (logChannel != null)
                                 {
-                                    kvp.Value.TotalSeconds += (now - kvp.Value.LastJoinTime.Value).TotalSeconds;
-                                    kvp.Value.LastJoinTime = null;
+                                    // 抓取訊息 (limit 500 確保涵蓋這段時間的變動)
+                                    var messages = await logChannel.GetMessagesAsync(limit: 500).FlattenAsync();
+                                    var relevantLogs = messages
+                                        .Where(m => m.Timestamp >= evt.StartTime && m.Timestamp <= now)
+                                        .OrderBy(m => m.Timestamp);
+
+                                    foreach (var msg in relevantLogs)
+                                    {
+                                        bool isJoin = msg.Content.Contains("進入語音");
+                                        bool isLeave = msg.Content.Contains("離開語音");
+
+                                        if ((isJoin || isLeave) && msg.Content.Contains($"<#{evt.ChannelId}>"))
+                                        {
+                                            // 解析格式: ... **名字** 進入了...
+                                            var parts = msg.Content.Split("**");
+                                            if (parts.Length >= 4)
+                                            {
+                                                string dName = parts[3];
+                                                // 透過 Nickname 找回成員
+                                                var matchedUser = guildChannel.Guild.Users.FirstOrDefault(u => (u.Nickname ?? u.Username) == dName);
+
+                                                if (matchedUser != null)
+                                                {
+                                                    if (!evt.Participants.ContainsKey(matchedUser.Id))
+                                                        evt.Participants[matchedUser.Id] = new VoiceParticipant { DisplayName = dName }; // 解決報錯處
+
+                                                    var p = evt.Participants[matchedUser.Id];
+                                                    if (isJoin) p.LastJoinTime = msg.Timestamp.LocalDateTime;
+                                                    else if (isLeave && p.LastJoinTime.HasValue)
+                                                    {
+                                                        p.TotalSeconds += (msg.Timestamp.LocalDateTime - p.LastJoinTime.Value).TotalSeconds;
+                                                        p.LastJoinTime = null;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
-                            // 🏆 篩選出大於等於 5 分鐘 (300 秒) 的人
-                            var qualifiedIds = evt.Participants.Where(x => x.Value.TotalSeconds >= 300).Select(x => x.Key).ToHashSet();
+                            // 結算最後還在頻道內的人
+                            foreach (var kvp in evt.Participants.Where(x => x.Value.LastJoinTime.HasValue))
+                            {
+                                kvp.Value.TotalSeconds += (now - kvp.Value.LastJoinTime.Value).TotalSeconds;
+                            }
+
+                            // 🏆 自動過濾：待滿 180 秒 (3分鐘)
+                            var qualifiedIds = evt.Participants
+                                .Where(x => x.Value.TotalSeconds >= 180)
+                                .Select(x => x.Key).ToHashSet();
 
                             string sessId = Guid.NewGuid().ToString("N").Substring(0, 8);
                             _pendingDistributions[sessId] = new PendingEventDistribution
                             {
                                 GuildId = gid,
                                 Points = points,
-                                Reason = finalReason, // 👈 換成包含備註的完整原因
+                                Reason = finalReason,
                                 AdminId = exec.Id,
                                 FinalUserIds = qualifiedIds,
-                                ActionLogs = evt.ActionLogs,
                                 StartTime = evt.StartTime,
                                 EndTime = now
                             };
 
-                            _activeEvents.Remove(vcId); // 停止追蹤此頻道
+                            _activeEvents.Remove(vcId);
                             await UpdateEventDashboardAsync(command, sessId, guildChannel.Guild, isFirst: true);
                             break;
                         }
@@ -2283,7 +2315,7 @@ namespace ROCAPointBot
                 if (logChannel != null)
                 {
                     // 將 {Program.GetTaipeiTime():HH:mm:ss} 改為 {Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}
-                    await logChannel.SendMessageAsync($"🔴 **[離開語音]** `[{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}]` **{dName}** 離開了頻道 <#{oldState.VoiceChannel.Id}>");
+                    await logChannel.SendMessageAsync($" **[離開語音]** `[{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}]` **{dName}** 離開了頻道 <#{oldState.VoiceChannel.Id}>");
                 }
             }
 
@@ -2302,7 +2334,7 @@ namespace ROCAPointBot
                 if (logChannel != null)
                 {
                     // 同樣將格式改為 yyyy-MM-dd HH:mm:ss
-                    await logChannel.SendMessageAsync($"🟢 **[進入語音]** `[{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}]` **{dName}** 進入了頻道 <#{newState.VoiceChannel.Id}>");
+                    await logChannel.SendMessageAsync($" **[進入語音]** `[{Program.GetTaipeiTime():yyyy-MM-dd HH:mm:ss}]` **{dName}** 進入了頻道 <#{newState.VoiceChannel.Id}>");
                 }
             }
         }
@@ -2548,6 +2580,8 @@ namespace ROCAPointBot
     {
         public DateTime? LastJoinTime { get; set; }
         public double TotalSeconds { get; set; }
+        // 👇 新增這行來解決報錯
+        public string? DisplayName { get; set; }
     }
     public class PendingEventDistribution
     {
