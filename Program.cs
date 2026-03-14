@@ -2060,28 +2060,31 @@ namespace ROCAPointBot
 
                     int successCount = 0;
                     List<string> failedNames = new();
+                    List<string> participantNicknames = new(); // 👈 用來儲存純文字名單
 
                     // 開始跑批次發放
                     foreach (var uid in pending.FinalUserIds)
                     {
                         var targetUser = executor.Guild.GetUser(uid);
-                        // 👇 雙重保險：如果有人手動把機器人加進名單，這裡直接過濾掉
                         if (targetUser == null || targetUser.IsBot) continue;
 
-                        string name = targetUser.Nickname ?? targetUser.Username;
-                        if (name.Contains("]")) name = name.Substring(name.LastIndexOf(']') + 1).Trim();
+                        // 取得 Discord 顯示名稱 (不使用 .Mention，避免 Tag)
+                        string displayName = targetUser.Nickname ?? targetUser.Username;
+                        participantNicknames.Add(displayName);
 
-                        var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == name.ToLower());
+                        string rName = displayName;
+                        if (rName.Contains("]")) rName = rName.Substring(rName.LastIndexOf(']') + 1).Trim();
+
+                        var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == rName.ToLower());
                         if (rec == null)
                         {
-                            // 嚴格檢查模式：確保此人有在 Roblox 群組內
-                            if (!await VerifyUserInRobloxGroup(name, botConfig.RobloxGroupId)) { failedNames.Add(name); continue; }
-                            rec = new UserPoint { GuildId = gid, RobloxUsername = name, Points = 0 };
+                            if (!await VerifyUserInRobloxGroup(rName, botConfig.RobloxGroupId)) { failedNames.Add(rName); continue; }
+                            rec = new UserPoint { GuildId = gid, RobloxUsername = rName, Points = 0 };
                             db.UserPoints.Add(rec);
                         }
 
                         rec.Points += pending.Points;
-                        db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = name, AdminName = executor.Username, PointsAdded = pending.Points, Reason = pending.Reason, Timestamp = Program.GetTaipeiTime() });
+                        db.PointLogs.Add(new PointLog { GuildId = gid, RobloxUsername = rName, AdminName = executor.Username, PointsAdded = pending.Points, Reason = pending.Reason, Timestamp = Program.GetTaipeiTime() });
                         successCount++;
                     }
 
@@ -2089,20 +2092,38 @@ namespace ROCAPointBot
                     _ = UpdateGoogleSheetAsync(gid);
                     _pendingDistributions.Remove(sessId);
 
-                    // 👇 計算用於最終推播的總時長 (精簡到分鐘即可)
+                    // 計算總時長
                     var duration = pending.EndTime - pending.StartTime;
                     string durationStr = $"{(int)duration.TotalHours} 小時 {duration.Minutes} 分鐘";
 
-                    // 👇 在廣播訊息中加入「活動總時長」
-                    string resultMsg = $"✅ **語音活動點數發放完成！**\n>  **成功發放對象：** {successCount} 人\n>  **每人獲得：** {pending.Points} 點\n>  **原因：** {pending.Reason}\n>  **活動總時長：** {durationStr}\n>  **登記長官：** {executor.Mention}";
+                    // 建立純文字名單字串 (以逗號分隔)
+                    string namesJoined = participantNicknames.Count > 0 ? string.Join("、", participantNicknames) : "無";
+                    // 取得執行長官的純文字名稱
+                    string adminName = executor.Nickname ?? executor.Username;
+
+                    // 1. 公開頻道廣播訊息 (移除所有 Mention)
+                    string resultMsg = $"✅ **語音活動點數發放完成！**\n" +
+                                       $">  **參與人數：** {successCount} 人\n" +
+                                       $">  **參與人員：** {namesJoined}\n" + // 顯示純文字名單
+                                       $">  **每人獲得：** {pending.Points} 點\n" +
+                                       $">  **活動名稱：** {pending.Reason}\n" +
+                                       $">  **活動總時長：** {durationStr}\n" +
+                                       $">  **登記長官：** {adminName}"; // 改為純文字
+
                     if (failedNames.Any()) resultMsg += $"\n\n⚠️ **下列人員發放失敗 (未綁定Roblox或不在群組)：**\n`{string.Join(", ", failedNames)}`";
 
-                    // 發布公開廣播 (不限制僅長官可見)
                     await component.Channel.SendMessageAsync(resultMsg);
 
-                    // 推播給總部與 Log 頻道的訊息也加上時長
+                    // 2. 推播給總部與 Log 頻道的訊息
                     bool isAnomaly = pending.Points >= 100;
-                    _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{executor.Username}** 已完成語音活動批次發放\n>  活動：**{pending.Reason}**\n>  總時長：**{durationStr}**\n>  參與人數：**{successCount}** 人\n>  每人獲得：**{pending.Points}** 點", isAnomaly);
+                    string broadcastMsg = $"負責人 **{executor.Username}** 已完成語音活動批次發放\n" +
+                                          $">  活動：**{pending.Reason}**\n" +
+                                          $">  總時長：**{durationStr}**\n" +
+                                          $">  參與人數：**{successCount}** 人\n" +
+                                          $">  **人員名單：{namesJoined}**\n" + // 推播訊息同步顯示純文字名單
+                                          $">  每人獲得：**{pending.Points}** 點";
+
+                    _ = BroadcastToAdminChannelsAsync(gid, broadcastMsg, isAnomaly);
                     return;
                 }
                 // ================================================================
