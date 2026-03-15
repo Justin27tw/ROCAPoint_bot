@@ -664,8 +664,8 @@ namespace ROCAPointBot
                             string reason = (string)command.Data.Options.First(x => x.Name == "reason").Value;
                             string note = command.Data.Options.FirstOrDefault(x => x.Name == "note")?.Value as string ?? "無";
 
-                            // 生成一個暫存 ID 來儲存這次的發放資訊
-                            string batchSessId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                            // 生成一個暫存 ID
+                            string batchSessId = Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper();
                             _pendingDistributions[batchSessId] = new PendingEventDistribution
                             {
                                 GuildId = gid,
@@ -678,11 +678,15 @@ namespace ROCAPointBot
                                 .WithCustomId($"batchsel_{batchSessId}")
                                 .WithPlaceholder("在此勾選要發放的人員 (最多 25 人)")
                                 .WithType(ComponentType.UserSelect)
-                                .WithMaxValues(25); // Discord 限制單次最高 25 人
+                                .WithMaxValues(25);
 
-                            var comp = new ComponentBuilder().WithSelectMenu(menuBuilder);
+                            var comp = new ComponentBuilder()
+                                .WithSelectMenu(menuBuilder)
+                                // 👇 新增確認與取消按鈕
+                                .WithButton("✅ 確認發放", $"batchok_{batchSessId}", ButtonStyle.Success)
+                                .WithButton("❌ 取消操作", $"batchcancel_{batchSessId}", ButtonStyle.Danger);
 
-                            await command.FollowupAsync($" **[批次發放]** 請在下方選單中勾選要發放 **{pts} 點** 的成員：\n> **原因：** {reason}\n> **備註：** {note}", components: comp.Build());
+                            await command.FollowupAsync($"👥 **[批次發放準備]** 編號：`#{batchSessId}`\n> **發放點數：** {pts} 點\n> **原因備註：** {reason} / {note}\n\n請先在下方**選擇人員**，確認名單後按下按鈕執行。", components: comp.Build());
                             break;
                         }
                     case "viewall":
@@ -2084,13 +2088,38 @@ namespace ROCAPointBot
                     if (!_pendingDistributions.TryGetValue(sessId, out var pending)) { await component.RespondAsync("❌ 此操作已過期。", ephemeral: true); return; }
                     if (executor.Id != pending.AdminId) { await component.RespondAsync("❌ 僅限發起指令的長官操作。", ephemeral: true); return; }
 
-                    await component.UpdateAsync(m => { m.Content = "⏳ 正在處理批次發放，請稍候..."; m.Components = null; });
+                    // 取得選中的 ID 並存入暫存
+                    var selectedIds = component.Data.Values.Select(ulong.Parse).ToHashSet();
+                    pending.FinalUserIds = selectedIds;
 
-                    var selectedIds = component.Data.Values.Select(ulong.Parse).ToList();
+                    // 回應一個隱藏訊息告知已選取多少人，不更新原始訊息避免按鈕跳動
+                    await component.RespondAsync($"⏳ 已暫時選取 **{selectedIds.Count}** 位人員，請確認無誤後點擊「確認發放」。", ephemeral: true);
+                    return;
+                }
+                // 處理取消按鈕
+                if (id.StartsWith("batchcancel_"))
+                {
+                    string sessId = id.Split('_')[1];
+                    _pendingDistributions.Remove(sessId);
+                    await component.UpdateAsync(m => { m.Content = "❌ 批次發放操作已取消。"; m.Components = null; });
+                    return;
+                }
+
+                // 處理確認發放按鈕
+                if (id.StartsWith("batchok_"))
+                {
+                    string sessId = id.Split('_')[1];
+                    if (!_pendingDistributions.TryGetValue(sessId, out var pending)) { await component.RespondAsync("❌ 此操作已過期。", ephemeral: true); return; }
+                    if (executor.Id != pending.AdminId) { await component.RespondAsync("❌ 僅限發起指令的長官操作。", ephemeral: true); return; }
+                    if (pending.FinalUserIds.Count == 0) { await component.RespondAsync("❌ 您尚未選擇任何人員！", ephemeral: true); return; }
+
+                    await component.UpdateAsync(m => { m.Content = $"⏳ 正在執行批次發放 `#{sessId}`，請稍候..."; m.Components = null; });
+
                     List<string> successNames = new();
                     List<string> failedNames = new();
+                    List<int> logIds = new(); // 記錄這一批產生的所有 ID
 
-                    foreach (var uid in selectedIds)
+                    foreach (var uid in pending.FinalUserIds)
                     {
                         var targetUser = executor.Guild.GetUser(uid);
                         if (targetUser == null || targetUser.IsBot) continue;
@@ -2105,7 +2134,6 @@ namespace ROCAPointBot
                             continue;
                         }
 
-                        // 注意這裡：已修正為 == gid
                         var rec = await db.UserPoints.FirstOrDefaultAsync(u => u.GuildId == gid && u.RobloxUsername.ToLower() == rName.ToLower());
                         if (rec == null)
                         {
@@ -2114,41 +2142,42 @@ namespace ROCAPointBot
                         }
                         rec.Points += pending.Points;
 
-                        db.PointLogs.Add(new PointLog
+                        var newLog = new PointLog
                         {
                             GuildId = gid,
                             RobloxUsername = rName,
                             AdminName = executor.Username,
                             PointsAdded = pending.Points,
-                            Reason = $"[批次發放] {pending.Reason}",
+                            Reason = $"[批次#{sessId}] {pending.Reason}", // 註記批次編號
                             Timestamp = Program.GetTaipeiTime()
-                        });
-
+                        };
+                        db.PointLogs.Add(newLog);
                         successNames.Add(displayName);
+                        // 先暫存以利後續顯示
+                        await db.SaveChangesAsync();
+                        logIds.Add(newLog.Id);
                     }
 
-                    await db.SaveChangesAsync();
                     _ = UpdateGoogleSheetAsync(gid);
                     _pendingDistributions.Remove(sessId);
 
                     string namesJoined = string.Join("、", successNames);
-                    string resultMsg = $"✅ **批次發放點數完成！**\n" +
+                    string resultMsg = $"✅ **批次發放點數完成！ (編號：#{sessId})**\n" +
                                        $">  **受領人員：** {namesJoined}\n" +
-                                       $">  **發放點數：** {pending.Points} 點\n" +
+                                       $">  **每人獲得：** {pending.Points} 點\n" +
                                        $">  **原因備註：** {pending.Reason}\n" +
-                                       $">  **執行長官：** {executor.Username}";
+                                       $">  **執行長官：** {executor.Username}\n" +
+                                       $">  **紀錄 ID 範圍：** `{logIds.Min()} ~ {logIds.Max()}`";
 
-                    if (failedNames.Any()) resultMsg += $"\n⚠️ **發放失敗 (不在群組)：** {string.Join(", ", failedNames)}";
+                    if (failedNames.Any()) resultMsg += $"\n⚠️ **發放失敗：** {string.Join(", ", failedNames)}";
 
                     await component.Channel.SendMessageAsync(resultMsg);
 
-                    bool isAnomaly = pending.Points >= 100;
-                    string broadcastMsg = $"負責人 **{executor.Username}** 已執行批次發放\n" +
+                    // 推播給總部 (顯示 Nickname，不 Tag)
+                    _ = BroadcastToAdminChannelsAsync(gid, $"負責人 **{executor.Username}** 已執行批次發放 `#{sessId}`\n" +
                                           $"> 活動原因：**{pending.Reason}**\n" +
                                           $"> **名單：{namesJoined}**\n" +
-                                          $"> 每人獲得：**{pending.Points}** 點";
-
-                    _ = BroadcastToAdminChannelsAsync(gid, broadcastMsg, isAnomaly);
+                                          $"> 每人獲得：**{pending.Points}** 點", pending.Points >= 100);
                     return;
                 }
                 if (id.StartsWith("evcancel_"))
