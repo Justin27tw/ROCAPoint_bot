@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# 這裡放置專案私有的敏感金鑰檔案
+google-credentials.json
+appsettings.json
